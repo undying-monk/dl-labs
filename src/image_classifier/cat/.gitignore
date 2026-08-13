@@ -4,3 +4,4 @@ __pycache__/
 cat_dog_classifer.*
 logs/
 save/
+*.weights.h5
