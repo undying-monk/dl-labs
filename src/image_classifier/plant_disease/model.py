@@ -32,6 +32,43 @@ def build_cnn_model(num_classes):
 
     return model
 
+def build_multi_tasks_model(num_plants, num_diseases):
+    inputs = Input(shape=(256, 256,3))
+    # x = Reshape((256, 256, 3)))
+
+    ## data augmentation
+    x = RandomRotation(factor=0.15)(inputs),
+    x = RandomFlip("horizontal")(x)
+    x = RandomContrast(factor=0.1)(x)
+
+    for filters, drop_rate in [(32,0.15), (64,0.2), (128, 0.25)]:
+        x = Conv2D(filters=filters, kernel_size=(3,3), activation='relu')(x) # 253x253x32
+        x = BatchNormalization()(x)
+        x = Conv2D(filters=filters, kernel_size=(3,3), activation='relu')(x) # 253x253x32
+        x = BatchNormalization()(x)
+
+        x = MaxPool2D((x))  
+        x = Dropout(drop_rate(x))
+
+
+    x = Conv2D(filters=256, kernel_size=(3,3), activation='relu')(x) # 253x253x32
+    x = BatchNormalization()(x)
+    x = MaxPool2D()(x) 
+
+    x = GlobalAveragePooling2D()(x) # 64 params
+    x = Dense(units=256,activation='relu')(x) # 32 * 64 + 32 = 2080 parameters
+
+    plant_output = Dense(units=int(num_plants),activation='softmax',name='plant')(x)
+    disease_output = Dense(units=int(num_diseases),activation='sigmoid',name='disease')(x)
+
+    return tf.keras.Model(
+        inputs=inputs,
+        outputs={
+            "plant": plant_output,
+            "disease": disease_output
+    }
+)
+
 def build_model(hp: kt.HyperModel):
     model = Sequential()
     learning_rate = hp.Float('learning_rate', min_value=1e-4, max_value=3e-3, sampling="log")

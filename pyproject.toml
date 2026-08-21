@@ -3,7 +3,7 @@ name = "dl-labs"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
     "h5py>=3.16.0",
     "keras-tuner>=1.4.8",
