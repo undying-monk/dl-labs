@@ -3,6 +3,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models import ResNet50_Weights
 from torchvision import datasets, models, transforms
+from torch.optim import lr_scheduler
 from torchmetrics.classification import (
     MulticlassAccuracy,
     MulticlassPrecision,
@@ -59,6 +60,10 @@ class ResNet50Model(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad = False
 
+        # Use for fine tune/ unfreeze specific layers
+        for param in self.backbone.layer4.parameters():
+            param.requires_grad = True   
+
         in_features = self.backbone.fc.in_features
         self.backbone.fc = nn.Identity() # simply drop the backbone head fc layer
         self.classifier = nn.Sequential(
@@ -68,6 +73,7 @@ class ResNet50Model(nn.Module):
             nn.Dropout(0.3),
             nn.Linear(512, num_classes)
         )
+        
         
     def forward(self, x):
         x = self.backbone(x)
@@ -127,10 +133,11 @@ def test_loop(dataloader, model, loss_fn, device):
     test_loss /= num_batches
     test_correct /= size
     print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_correct:.4f}")
+
     return test_correct, test_loss, (torch.cat(y_pred, dim=0), torch.cat(labels, dim=0))
 
 
-def train_model(epochs, model, train_loader, val_loader, loss_fn, optimizer, batch_size, device, num_classes):
+def train_model(epochs, model, train_loader, val_loader, loss_fn, optimizer, scheduler, batch_size, device, num_classes):
     # accuracy = MulticlassAccuracy(num_classes=num_classes)
     history = {
         "train_acc": [],
@@ -150,21 +157,40 @@ def train_model(epochs, model, train_loader, val_loader, loss_fn, optimizer, bat
             average="macro"
         ).to(device),
     }
+    best_val_correct = 0.0
 
-    for t in range(epochs):
+    for epoch in range(epochs):
         train_correct,train_loss = train_loop(train_loader, model, loss_fn, optimizer, batch_size, device)
-        test_correct,test_loss, (y_pred, y) = test_loop(val_loader, model, loss_fn, device) # for evaluate in each epoch
+        val_correct,val_loss, (y_pred, y) = test_loop(val_loader, model, loss_fn, device) # for evaluate in each epoch
         history["train_acc"].append(train_correct)
         history["train_loss"].append(train_loss)
-        history["val_acc"].append(test_correct)
-        history["val_loss"].append(test_loss)
+        history["val_acc"].append(val_correct)
+        history["val_loss"].append(val_loss)
+
+        # -----------------------
+        # Save best model
+        # -----------------------
+        if val_correct > best_val_correct:
+            best_val_correct = val_correct
+
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict()
+                    if scheduler is not None else None,
+                "val_loss": val_loss,
+                "val_acc": val_correct,
+            }, "save/stage1_latest.pth")
 
         # accuracy.update(y_pred, y)
         history["val_precision"].update(y_pred, y)
         history["val_recall"].update(y_pred, y)
         history["val_f1"].update(y_pred, y)
 
+        scheduler.step()
         print("Done!")
+        
 
     history["val_precision"] = history["val_precision"].compute().item()
     history["val_recall"] = history["val_recall"].compute().item()
