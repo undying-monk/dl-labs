@@ -2,6 +2,7 @@ import keras_tuner as kt
 import tensorflow as tf
 from tensorflow.keras.layers import Dense,Flatten,Conv2D,BatchNormalization,MaxPool2D,Rescaling, GlobalAveragePooling2D,Input,Reshape,Dropout,RandomRotation,RandomContrast, RandomFlip
 from tensorflow.keras.models import Sequential
+from tensorflow.keras.applications import ResNet50
 
 def build_cnn_model(num_classes):
     model = Sequential()
@@ -31,6 +32,23 @@ def build_cnn_model(num_classes):
     model.add(Dense(units=int(num_classes),activation='softmax')) #  32 * 10 + 10 = 330 params
 
     return model
+
+def build_ResNet50_model(num_classes):
+    base_model = ResNet50(
+        weights="imagenet",
+        include_top=False, # include_top=True includes the final dense classification layer for 1000 ImageNet classes
+        input_shape=(256,256,3),
+        pooling="avg"
+    )
+    base_model.trainable = False
+
+    inputs = Input(shape=(256, 256,3))
+    x = base_model(inputs, training=False) # prevents the weights in a given layer from being updated during training
+    x = Dense(256, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    outputs = Dense(num_classes, activation='softmax')(x)
+    return tf.keras.Model(inputs, outputs)
+    
 
 def build_multi_tasks_model(num_plants, num_diseases):
     inputs = Input(shape=(256, 256,3))

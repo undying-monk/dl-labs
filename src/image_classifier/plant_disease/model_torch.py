@@ -1,7 +1,8 @@
 from torch import nn
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torchvision import datasets, transforms
+from torchvision.models import ResNet50_Weights
+from torchvision import datasets, models, transforms
 from torchmetrics.classification import (
     MulticlassAccuracy,
     MulticlassPrecision,
@@ -48,6 +49,28 @@ class CNNModel(nn.Module):
         x = self.features(x)
         x = self.global_pool(x) 
         x = torch.flatten(x, 1)    # Output shape: [Batch, 64] (Flattens 1x1 spatial dims)
+        x = self.classifier(x)
+        return x
+
+class ResNet50Model(nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.backbone = models.resnet50(weights=ResNet50_Weights.DEFAULT) # Load weights pre-trained on ImageNet
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
+        in_features = self.backbone.fc.in_features
+        self.backbone.fc = nn.Identity() # simply drop the backbone head fc layer
+        self.classifier = nn.Sequential(
+            # nn.Dropout(0.3),
+            nn.Linear(in_features, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, num_classes)
+        )
+        
+    def forward(self, x):
+        x = self.backbone(x)
         x = self.classifier(x)
         return x
 
