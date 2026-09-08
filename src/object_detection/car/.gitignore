@@ -1,0 +1,10 @@
+model_data/VOC2007/*
+model_data/saved_model.pb
+model_data/*.h5
+test/
+.ipynb_checkpoints/
+__pycache__/
+cat_dog_classifer.*
+logs/
+save/
+*.weights.h5
