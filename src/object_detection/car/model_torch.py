@@ -93,27 +93,27 @@ class Darknet19(nn.Module):
 
     def forward(self, x):
         x = self.stage1(x)
-        print("stage1:", x.shape)
+        # print("stage1:", x.shape)
 
         x = self.stage2(x)
-        print("stage2:", x.shape)
+        # print("stage2:", x.shape)
 
         x = self.stage3(x)
-        print("stage3:", x.shape)
+        # print("stage3:", x.shape)
 
         x = self.stage4(x)
-        print("stage4:", x.shape)
+        # print("stage4:", x.shape)
 
         x = self.stage5(x)
-        print("stage5:", x.shape)
+        # print("stage5:", x.shape)
 
         x_stage5 = x.clone() 
 
         x = self.pool5(x)
-        print("pool5:", x.shape)
+        # print("pool5:", x.shape)
 
         x = self.stage6(x)
-        print("stage6:", x.shape)
+        # print("stage6:", x.shape)
 
         x_stage6 = x.clone()
         return x_stage5, x_stage6
@@ -141,17 +141,17 @@ class YOLOv2(nn.Module):
         x = x_stage5
         for i in range(len(self.stage6)):
             x = self.stage6[i](x)                         #(2)
-        print("before passthrough", x_stage4.shape)
+        # print("before passthrough", x_stage4.shape)
         route = self.route_conv(x_stage4) # [B, 64, 26, 26]
         x_stage4 = self.passthrough(route) # [B, 256, 13, 13]         
-        print("after passthrough", x_stage4.shape)
+        # print("after passthrough", x_stage4.shape)
 
         x = torch.cat([x_stage4, x], dim=1)              
-        print(f'\nx after concatenate\t\t: {x.size()}')
+        # print(f'\nx after concatenate\t\t: {x.size()}')
         
         for i in range(len(self.stage7)):               
             x = self.stage7[i](x)
-            print(f'x after stage7 #{i}\t: {x.size()}')    
+            # print(f'x after stage7 #{i}\t: {x.size()}')    
 
         x = encode_archor(x, num_anchors=self.num_anchors, num_classes=self.num_classes)
         return x
@@ -172,6 +172,7 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, device):
         # forward
         pred = model(x)
         loss = loss_fn(pred, y)
+        print("loss", loss)
 
         # backward
         loss.backward() # compute gradient
