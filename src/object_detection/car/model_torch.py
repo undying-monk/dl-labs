@@ -268,24 +268,24 @@ def train_model(epochs, model, train_loader, val_loader, loss_fn, optimizer, sch
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                # "scheduler_state_dict": scheduler.state_dict()
-                #     if scheduler is not None else None,
-                # "val_loss": val_loss,
-                # "val_acc": val_correct,
+                "scheduler_state_dict": scheduler.state_dict()
+                    if scheduler is not None else None,
+                "val_loss": val_loss,
+                "val_acc": val_correct,
             }, "save/stage1_latest.pth")
 
         # accuracy.update(y_pred, y)
-        # history["val_precision"].update(y_pred, y)
-        # history["val_recall"].update(y_pred, y)
-        # history["val_f1"].update(y_pred, y)
+        history["val_precision"].update(y_pred, y)
+        history["val_recall"].update(y_pred, y)
+        history["val_f1"].update(y_pred, y)
 
         # scheduler.step()
         print("Done!")
         
 
-    # history["val_precision"] = history["val_precision"].compute().item()
-    # history["val_recall"] = history["val_recall"].compute().item()
-    # history["val_f1"] = history["val_f1"].compute().item()
+    history["val_precision"] = history["val_precision"].compute().item()
+    history["val_recall"] = history["val_recall"].compute().item()
+    history["val_f1"] = history["val_f1"].compute().item()
 
     return history
 
