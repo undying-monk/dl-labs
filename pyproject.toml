@@ -17,7 +17,19 @@ dependencies = [
     "tensorflow-datasets>=4.9.10",
     "torch>=2.13.0",
     "torchinfo>=1.8.0",
-    "torchmetrics>=1.9.0",
+    "torchmetrics[detection]>=1.9.0",
     "torchvision>=0.28.0",
 ]
 
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

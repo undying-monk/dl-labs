@@ -1,13 +1,14 @@
-import tensorflow as tf
 import numpy as np
 import torchvision.ops as ops
 import torch
-import pandas as pd
 import math
-from PIL import Image, ImageDraw, ImageFont
-import colorsys
-import random
+from PIL import Image, ImageDraw
 from torchvision.ops import nms
+from torchvision.utils import draw_bounding_boxes
+from torchvision.transforms.functional import to_pil_image
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+from torchvision.ops import batched_nms
 
 def read_classes(classes_path):
     with open(classes_path) as f:
@@ -50,7 +51,7 @@ def iou_anchor(bb,anchor):
     bb_area = bb[0] * bb[1]
     anchor_area = anchor[0] * anchor[1]
     union = bb_area + anchor_area - inter
-    return inter/union
+    return inter / union
 
 
 def find_highest_iou_anchor(bounding_box,anchors):
@@ -64,16 +65,15 @@ def find_highest_iou_anchor(bounding_box,anchors):
             best_iou = iou
             best_anchor = anchor_idx
 
-    return best_anchor
+    return best_anchor, best_iou
 
-
-def encode_yolo_target(image, target, anchors, grid_shape, num_classes):
+def encode_yolo_target(target, anchors, grid_width, grid_height, grid_shape, num_classes):
     bounding_boxes = target["boxes"]
     labels = target["labels"]
 
-    width, height = image.size
-    grid_height = height/grid_shape[0]
-    grid_width = width/grid_shape[1]
+    # width, height = image.size
+    # grid_height = height/grid_shape[0]
+    # grid_width = width/grid_shape[1]
 
     # label_data = np.zeros((grid_shape[0],grid_shape[1], len(anchors), 5+num_classes))
     label_data = torch.full((grid_shape[0],grid_shape[1], len(anchors), 5+num_classes), 0.0, dtype=torch.float32)
@@ -86,37 +86,46 @@ def encode_yolo_target(image, target, anchors, grid_shape, num_classes):
         ymax = box[3]
 
         # find central point to find grid cell
-        midpoint_x = (xmax - xmin) /2
-        midpoint_y = (ymax - ymin) /2
-        b_w = (xmax - xmin) / grid_width # calculate width and convert into grid units
-        b_h = (ymax - ymin) / grid_height # calculate width and convert into grid units
+        midpoint_x = xmin + (xmax - xmin) /2
+        midpoint_y = ymin + (ymax - ymin) /2
+        b_w = (xmax - xmin) / grid_width
+        b_h = (ymax - ymin) / grid_height
 
         grid_x = int(midpoint_x / grid_width)
         grid_y = int(midpoint_y / grid_height)
 
-        t_x = (midpoint_x % grid_width) / grid_width # position inside cell
-        t_y = (midpoint_y % grid_height) / grid_height
+        g_x = midpoint_x / grid_width
+        g_y = midpoint_y / grid_height
+
+        t_x = g_x - grid_x # position inside cell
+        t_y = g_y - grid_y # position inside cell
 
         # print("position",t_x,t_y, midpoint_x, midpoint_y, grid_height)
 
         # find match anchor box with label bounding box
-        best_anchor = find_highest_iou_anchor([b_w,b_h], anchors)
+        best_anchor, best_iou = find_highest_iou_anchor([b_w,b_h], anchors)
+        # print("best_anchor", best_anchor, g_x, g_y , t_x.item(),t_y.item(), "anchors", anchors[best_anchor])
+        # print(grid_x, grid_y)
+
         # print("bounding box", f"[{b_w:.2f}, {b_h:.2f}]", "- anchor", anchors[best_anchor])
         t_w = math.log(b_w/anchors[best_anchor][0] )
         t_h = math.log(b_h/anchors[best_anchor][1] )
+        # print("t_w", t_w, "t_h", t_h)
+
 
         # position
-        label_data[grid_x, grid_y, best_anchor, 0] = t_x 
-        label_data[grid_x, grid_y, best_anchor, 1] = t_y
+        label_data[grid_y, grid_x, best_anchor, 0] = t_x 
+        label_data[grid_y, grid_x, best_anchor, 1] = t_y
+        
         # size
-        label_data[grid_x, grid_y, best_anchor, 2] = t_w  # width
-        label_data[grid_x, grid_y, best_anchor, 3] = t_h  # height
+        label_data[grid_y, grid_x, best_anchor, 2] = t_w  # width
+        label_data[grid_y, grid_x, best_anchor, 3] = t_h  # height
 
         # object exists
-        label_data[grid_x, grid_y, best_anchor, 4] = 1.0
+        label_data[grid_y, grid_x, best_anchor, 4] = 1.0
 
         # class
-        label_data[grid_x, grid_y, best_anchor, 5 + labels[i]] = 1.0
+        label_data[grid_y, grid_x, best_anchor, 5 + labels[i]] = 1.0
         # print("label_data", label_data[grid_x, grid_y, best_anchor, :]) 
     return label_data
 
@@ -137,96 +146,6 @@ def encode_archor(x, num_anchors, num_classes):
     return x
 
 
-
-def get_colors_for_classes(num_classes):
-    """Return list of random colors for number of classes given."""
-    # Use previously generated colors if num_classes is the same.
-    if (hasattr(get_colors_for_classes, "colors") and
-            len(get_colors_for_classes.colors) == num_classes):
-        return get_colors_for_classes.colors
-
-    hsv_tuples = [(x / num_classes, 1., 1.) for x in range(num_classes)]
-    colors = list(map(lambda x: colorsys.hsv_to_rgb(*x), hsv_tuples))
-    colors = list(
-        map(lambda x: (int(x[0] * 255), int(x[1] * 255), int(x[2] * 255)),
-            colors))
-    random.seed(10101)  # Fixed seed for consistent colors across runs.
-    random.shuffle(colors)  # Shuffle colors to decorrelate adjacent classes.
-    random.seed(None)  # Reset seed to default.
-    get_colors_for_classes.colors = colors  # Save colors for future calls.
-    return colors
-
-def textsize(text, font):
-    im = Image.new(mode="P", size=(0, 0))
-    draw = ImageDraw.Draw(im)
-    _, _, width, height = draw.textbbox((0, 0), text=text, font=font)
-    return width, height
-
-
-def draw_boxes(image, boxes, box_classes, class_names, scores=None):
-    """Draw bounding boxes on image.
-
-    Draw bounding boxes with class name and optional box score on image.
-
-    Args:
-        image: An `array` of shape (width, height, 3) with values in [0, 1].
-        boxes: An `array` of shape (num_boxes, 4) containing box corners as
-            (y_min, x_min, y_max, x_max).
-        box_classes: A `list` of indicies into `class_names`.
-        class_names: A `list` of `string` class names.
-        `scores`: A `list` of scores for each box.
-
-    Returns:
-        A copy of `image` modified with given bounding boxes.
-    """
-    #image = Image.fromarray(np.floor(image * 255 + 0.5).astype('uint8'))
-
-    font = ImageFont.truetype(
-        font='font/FiraMono-Medium.otf',
-        size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
-    thickness = (image.size[0] + image.size[1]) // 300
-
-    colors = get_colors_for_classes(len(class_names))
-
-    for i, c in list(enumerate(box_classes)):
-        box_class = class_names[c]
-        box = boxes[i]
-        
-        if isinstance(scores.numpy(), np.ndarray):
-            score = scores.numpy()[i]
-            label = '{} {:.2f}'.format(box_class, score)
-        else:
-            label = '{}'.format(box_class)
-
-        draw = ImageDraw.Draw(image)
-        label_size = textsize(label, font)
-
-        top, left, bottom, right = box
-        top = max(0, np.floor(top + 0.5).astype('int32'))
-        left = max(0, np.floor(left + 0.5).astype('int32'))
-        bottom = min(image.size[1], np.floor(bottom + 0.5).astype('int32'))
-        right = min(image.size[0], np.floor(right + 0.5).astype('int32'))
-        print(label, (left, top), (right, bottom))
-
-        if top - label_size[1] >= 0:
-            text_origin = np.array([left, top - label_size[1]])
-        else:
-            text_origin = np.array([left, top + 1])
-
-        # # My kingdom for a good redistributable image drawing library.
-        # for i in range(thickness):
-        #     draw.rectangle(
-        #         [left + i, top + i, right - i, bottom - i], outline=colors[c])
-        draw.rectangle(
-                        [left, top, right, bottom], outline=colors[c])
-        draw.rectangle(
-            [tuple(text_origin), tuple(text_origin + label_size)],
-            fill=colors[c])
-        draw.text(text_origin, label, fill=(0, 0, 0), font=font)
-        del draw
-
-    return np.array(image)
-
 def preprocess_image(img_path, model_image_size):
     image = Image.open(img_path)
     resized_image = image.resize(tuple(reversed(model_image_size)), Image.BICUBIC)
@@ -237,15 +156,211 @@ def preprocess_image(img_path, model_image_size):
     return image, image_data
 
 
-def decode_predictions(
-    prediction,
+def decode_batch_predictions(
+    predictions,
     anchors,
     stride=32,
+    objectness_threshold=0.01,
+    conf_threshold=0.05,
+    nms_threshold=0.5,
+):
+    """
+    predictions: [B, S, S, A, 5+C]
+    """
+
+    B, S, _, A, D = predictions.shape
+    C = D - 5
+
+    device = predictions.device
+    print("device", device)
+    dtype = predictions.dtype
+    anchors = torch.from_numpy(anchors).to(device)
+
+    # ---------------------------------------------
+    # Objectness
+    # ---------------------------------------------
+
+    objectness = torch.sigmoid(predictions[..., 4])
+    # [B, S, S, A]
+
+    # Filter obvious background predictions
+    obj_mask = objectness > objectness_threshold
+
+    results = []
+    print("obj_mask", obj_mask)
+
+    # We still loop over batch because TorchMetrics
+    # expects one prediction dict per image.
+    for b in range(B):
+
+        mask = obj_mask[b]
+
+        if not mask.any():
+            results.append({
+                "boxes": torch.empty(
+                    (0, 4),
+                    device=device,
+                    dtype=dtype,
+                ),
+                "scores": torch.empty(
+                    (0,),
+                    device=device,
+                    dtype=dtype,
+                ),
+                "labels": torch.empty(
+                    (0,),
+                    device=device,
+                    dtype=torch.long,
+                ),
+            })
+            continue
+
+        # ---------------------------------------------
+        # Select only promising predictions
+        # ---------------------------------------------
+
+        pred = predictions[b][mask]
+
+        # pred shape:
+        # [N, 5+C]
+
+        objectness_b = objectness[b][mask]
+
+        # ---------------------------------------------
+        # Classes
+        # ---------------------------------------------
+
+        class_probs = torch.sigmoid(
+            pred[:, 5:]
+        )
+
+        class_prob, labels = class_probs.max(dim=1)
+
+        scores = objectness_b * class_prob
+
+        # ---------------------------------------------
+        # Confidence filtering
+        # ---------------------------------------------
+
+        conf_mask = scores > conf_threshold
+
+        pred = pred[conf_mask]
+        objectness_b = objectness_b[conf_mask]
+        class_prob = class_prob[conf_mask]
+        labels = labels[conf_mask]
+        scores = scores[conf_mask]
+
+        if pred.numel() == 0:
+            results.append({
+                "boxes": torch.empty(
+                    (0, 4),
+                    device=device,
+                    dtype=dtype,
+                ),
+                "scores": torch.empty(
+                    (0,),
+                    device=device,
+                    dtype=dtype,
+                ),
+                "labels": torch.empty(
+                    (0,),
+                    device=device,
+                    dtype=torch.long,
+                ),
+            })
+            continue
+
+        # ---------------------------------------------
+        # Need grid indices for selected predictions
+        # ---------------------------------------------
+
+        # Recreate corresponding positions
+        grid_y, grid_x, anchor_idx = torch.where(
+            mask
+        )
+
+        # Apply confidence mask
+        grid_y = grid_y[conf_mask]
+        grid_x = grid_x[conf_mask]
+        anchor_idx = anchor_idx[conf_mask]
+
+        # ---------------------------------------------
+        # Decode
+        # ---------------------------------------------
+
+        tx = pred[:, 0]
+        ty = pred[:, 1]
+        tw = pred[:, 2]
+        th = pred[:, 3]
+       
+        anchor_wh = anchors[anchor_idx]
+
+        aw = anchor_wh[:, 0]
+        ah = anchor_wh[:, 1]
+
+        cx = (
+            torch.sigmoid(tx)
+            + grid_x.to(dtype)
+        ) * stride
+
+        cy = (
+            torch.sigmoid(ty)
+            + grid_y.to(dtype)
+        ) * stride
+
+        w = (
+            torch.exp(tw)
+            * aw
+            * stride
+        )
+
+        h = (
+            torch.exp(th)
+            * ah
+            * stride
+        )
+
+        xmin = cx - w / 2
+        ymin = cy - h / 2
+        xmax = cx + w / 2
+        ymax = cy + h / 2
+
+        boxes = torch.stack(
+            [xmin, ymin, xmax, ymax],
+            dim=1,
+        )
+
+        # ---------------------------------------------
+        # NMS
+        # ---------------------------------------------
+
+        keep = batched_nms(
+            boxes,
+            scores,
+            labels,
+            nms_threshold,
+        )
+
+        results.append({
+            "boxes": boxes[keep],
+            "scores": scores[keep],
+            "labels": labels[keep],
+        })
+
+    return results
+
+
+def decode_batch_predictions2(
+    prediction,
+    anchors,
+    device,
+    stride=32,
     conf_threshold=0.3,
+    nms_threshold=.5,
 ):
     """
     prediction:
-        [13, 13, 5, 25]
+        [B, 13, 13, 5, 25]
 
     anchors:
         [(aw, ah), ...]
@@ -256,6 +371,195 @@ def decode_predictions(
         labels [N]
     """
 
+    B = prediction.shape[0]
+    S = prediction.shape[1]
+    num_anchors = prediction.shape[3]
+
+    boxes = []
+    scores = []
+    labels = []
+    print("prediction")
+    
+    # no object found
+    objectness = prediction[..., 4]
+    no_obj_mask = objectness == 0
+    obj_mask = objectness == 1
+    print("objectness", obj_mask.shape)
+    # print("prediction[..., :4]", prediction[..., :4], prediction[..., :4].shape)
+
+
+    tx = prediction[..., 0]
+    print("tx", tx)
+    ty = prediction[..., 1]
+    tw = prediction[..., 2]
+    th = prediction[..., 3]
+    classes = prediction[..., 5:]
+    print("classes", classes)
+
+    # --------------------------------
+    # Decode center
+    # --------------------------------
+
+    x = torch.arange(
+        13,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    y = torch.arange(
+        13,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    # [S, S]
+    grid_y, grid_x = torch.meshgrid(
+        y,
+        x,
+        indexing="ij",
+    )
+    print("[S, S]", grid_y.shape)
+
+
+    # [1, S, S, 1]
+    grid_x = grid_x[None, :, :, None]
+    grid_y = grid_y[None, :, :, None]
+
+    cx = (tx + grid_x) * stride
+    cy = (ty + grid_y) * stride
+
+    # print("decoded cx cy", cx.item(), tx, gx, cy.item(), tx.item(), ty.item(), gy, gx)
+
+
+    # --------------------------------
+    # Decode size
+    # --------------------------------
+
+    print("Decode size")
+    anchor_w = anchors[:, 0].view([1, 1, 1, num_anchors])
+    anchor_h = anchors[:, 1].view([1, 1, 1, num_anchors])
+    print(anchor_w)
+    print(anchor_h)
+    # tw = log(bw/anchors[best_anchor])
+    # bw = anchors[best_anchor] * e^(tw) * grid_width
+
+    w = (
+        torch.exp(tw)
+        * anchor_w
+        * stride
+    )
+
+    h = (
+        torch.exp(th)
+        * anchor_h
+        * stride
+    )
+
+    print("decoded wh")
+
+    # --------------------------------
+    # xywh -> xyxy
+    # --------------------------------
+
+    xmin = cx - (w / 2)
+    ymin = cy - (h / 2)
+    xmax = cx + (w / 2)
+    ymax = cy + (h / 2)
+
+    box = torch.stack([
+        xmin,
+        ymin,
+        xmax,
+        ymax,
+    ], dim=-1)
+    # [B, S, S, A, 4]
+
+    # --------------------------------
+    # Objectness
+    # --------------------------------
+
+    objectness = torch.sigmoid(
+        objectness
+    )
+    
+
+    # --------------------------------
+    # Classes
+    # --------------------------------
+
+    class_probs = torch.sigmoid(
+        classes
+    )
+
+
+    class_prob, class_id = torch.max(
+        class_probs,
+        dim=-1
+    )
+
+    # --------------------------------
+    # Final confidence
+    # --------------------------------
+
+    confidence = (
+        objectness * class_prob
+    )
+    results = []
+    for b in range(B):
+        if confidence[b] >= conf_threshold:
+            boxes_b = box[b]
+            scores_b = confidence[b]
+            labels_b = class_id[b]
+
+        if boxes.numel() == 0:
+            results.append(
+                torch.empty((0, 4)),
+                torch.empty((0,)),
+                torch.empty((0,), dtype=torch.long),
+            )
+            continue
+
+        boxes_b = boxes_b.reshape(-1,4),
+        scores_b = scores_b.reshape(-1),
+        labels_b = labels_b.reshape(-1),
+        keep_nms = batched_nms(
+           boxes_b,
+           scores_b,
+           labels_b,
+           nms_threshold,
+        )
+
+        results.append({
+            "boxes": boxes_b[keep_nms],
+            "scores": scores_b[keep_nms],
+            "labels": labels_b[keep_nms],
+        })
+
+    return (
+        torch.stack(boxes),
+        torch.stack(scores),
+        torch.stack(labels),
+    )
+
+def decode_predictions(
+    prediction,
+    anchors,
+    stride=32,
+    conf_threshold=.3,
+):
+    """
+    prediction:
+        [B, 13, 13, 5, 25]
+
+    anchors:
+        [(aw, ah), ...]
+
+    returns:
+        boxes  [N, 4]
+        scores [N]
+        labels [N]
+    """
+ 
     S = prediction.shape[0]
     num_anchors = prediction.shape[2]
 
@@ -271,27 +575,30 @@ def decode_predictions(
                     gy, gx, anchor_idx
                 ]
 
+                # no object found
+                if pred[4] == 0:
+                    continue
+
                 tx, ty, tw, th = pred[:4]
 
                 # --------------------------------
                 # Decode center
                 # --------------------------------
 
+                cx = (tx + gx) * stride
+                cy = (ty + gy) * stride
 
+                # print("decoded cx cy", cx.item(), tx, gx, cy.item(), tx.item(), ty.item(), gy, gx)
 
-                cx = (
-                    torch.sigmoid(tx) + gx
-                ) * stride
-
-                cy = (
-                    torch.sigmoid(ty) + gy
-                ) * stride
 
                 # --------------------------------
                 # Decode size
                 # --------------------------------
 
                 anchor_w, anchor_h = anchors[anchor_idx]
+
+                # tw = log(bw/anchors[best_anchor])
+                # bw = anchors[best_anchor] * e^(tw) * grid_width
 
                 w = (
                     torch.exp(tw)
@@ -305,14 +612,16 @@ def decode_predictions(
                     * stride
                 )
 
+                # print("decoded wh", w.item(), h.item())
+
                 # --------------------------------
                 # xywh -> xyxy
                 # --------------------------------
 
-                xmin = cx - w / 2
-                ymin = cy - h / 2
-                xmax = cx + w / 2
-                ymax = cy + h / 2
+                xmin = cx - (w / 2)
+                ymin = cy - (h / 2)
+                xmax = cx + (w / 2)
+                ymax = cy + (h / 2)
 
                 box = torch.stack([
                     xmin,
@@ -400,3 +709,118 @@ def denormalize(image):
     ).view(3, 1, 1)
 
     return image * std + mean
+
+def plot_bounding_boxes(image, boxes, labels, enable_grid=False):
+    if type(boxes) == "list":
+        boxes = torch.tensor(boxes)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(to_pil_image(draw_bounding_boxes(
+        image,
+        boxes,
+        labels=labels,
+        width=2,
+    )))
+    if enable_grid:
+        show_yolo_grid(image, ax)
+    plt.axis("off")
+    plt.show()
+
+def plot_anchors(anchors):
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    # Draw rectangle shape width, height = 1,1
+    # ax.add_patch(
+    #     Rectangle(
+    #         (0, 0),
+    #         1, # width
+    #         1, # height
+    #         fill=False,
+    #         linewidth=2,
+    #     )
+    # )
+
+    # Anchor center
+    cx = 0.5
+    cy = 0.5
+
+    ax.plot(cx, cy, marker="o")
+
+
+    # Draw anchors shape
+    for i, (aw, ah) in enumerate(anchors):
+        xmin = cx - aw / 2 # in the left
+        ymin = cy - ah / 2  # in the right
+
+        rect = Rectangle(
+            (xmin, ymin),
+            aw,
+            ah,
+            fill=False,
+            linewidth=1.5,
+        )
+
+        ax.add_patch(rect)
+
+        ax.text(
+            xmin,
+            ymin,
+            f"A{i}: {aw:.2f}×{ah:.2f}",
+            fontsize=9,
+        )
+
+    # Show one grid cell from 0 to 1
+    ax.set_xlim(-9, 10)
+    ax.set_ylim(-7, 7)
+
+    ax.set_aspect("equal")
+
+    ax.set_xlabel("Grid X")
+    ax.set_ylabel("Grid Y")
+
+    plt.show()
+
+
+def show_yolo_grid(image, ax, grid_size=13):
+    """
+    image: torch.Tensor [C, H, W]
+    """
+    # Convert [C,H,W] -> [H,W,C]
+    image_np = image.permute(1, 2, 0).cpu().numpy()
+
+    H, W = image.shape[-2:]
+    stride_x = W / grid_size
+    stride_y = H / grid_size
+
+    # fig, ax = plt.subplots(figsize=(8, 8))
+    # ax.imshow(image_np)
+
+    # Vertical lines
+    for i in range(grid_size + 1):
+        x = i * stride_x
+        ax.axvline(x=x, linewidth=0.8)
+
+    # Horizontal lines
+    for i in range(grid_size + 1):
+        y = i * stride_y
+        ax.axhline(y=y, linewidth=0.8)
+
+    # Show grid coordinates
+    for gy in range(grid_size):
+        for gx in range(grid_size):
+            x = (gx + 0.5) * stride_x
+            y = (gy + 0.5) * stride_y
+
+            ax.text(
+                x,
+                y,
+                f"{gx},{gy}",
+                ha="center",
+                va="center",
+                fontsize=7,
+            )
+
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    # plt.show()
