@@ -2,7 +2,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 import xml.etree.ElementTree as ET
 import torch
-from object_detection.car.utils.util import get_sorted_iou_anchors
+from object_detection.yolov2.utils.util import get_sorted_iou_anchors
 from torchvision.transforms import v2
 from torchvision import tv_tensors
 
