@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+from pathlib import Path
 from torchmetrics.classification import (
     MulticlassAccuracy,
 )
@@ -257,6 +258,46 @@ def test_loop(dataloader, model, loss_fn, num_classes, anchors, device):
 
     return history
 
+def save_checkpoint(path, epoch, model, optimizer=None, scheduler=None, metrics=None):
+    """Save a resumable YOLOv2 training checkpoint."""
+    model_config = {}
+    if hasattr(model, "num_anchors"):
+        model_config["num_anchors"] = model.num_anchors
+    if hasattr(model, "num_classes"):
+        model_config["num_classes"] = model.num_classes
+
+    checkpoint = {
+        "format_version": 1,
+        "epoch": epoch,
+        "model_config": model_config,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+        "metrics": metrics or {},
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(checkpoint, path)
+
+
+def load_checkpoint(path, model, optimizer=None, scheduler=None, map_location=None):
+    """Load a checkpoint produced by :func:`save_checkpoint`."""
+    checkpoint = torch.load(path, map_location=map_location, weights_only=False)
+    required_keys = {"format_version", "epoch", "model_state_dict", "metrics"}
+    missing_keys = required_keys - checkpoint.keys()
+    if missing_keys:
+        raise ValueError(
+            f"Invalid YOLOv2 checkpoint at {path}: missing keys {sorted(missing_keys)}"
+        )
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    if optimizer is not None and checkpoint["optimizer_state_dict"] is not None:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    if scheduler is not None and checkpoint["scheduler_state_dict"] is not None:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    return checkpoint
+
+
 def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, scheduler, batch_size, num_classes, anchors, device):
     best_val_map = 0.0
 
@@ -279,13 +320,14 @@ def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, sche
         if val_result['map'] > best_val_map:
             best_val_map = val_result['map']
 
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
-                "best_val_map": best_val_map,
-            }, "save/stage1_latest.pth")
+            save_checkpoint(
+                "save/stage1_latest.pth",
+                epoch,
+                model,
+                optimizer,
+                scheduler,
+                metrics={"best_val_map": best_val_map},
+            )
 
         # scheduler.step()
         print(
