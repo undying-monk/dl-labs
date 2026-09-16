@@ -93,7 +93,7 @@ def encode_yolo_target(target, anchors, grid_width, grid_height, grid_shape, num
     # grid_width = width/grid_shape[1]
 
     # label_data = np.zeros((grid_shape[0],grid_shape[1], len(anchors), 5+num_classes))
-    label_data = torch.full((*grid_shape, len(bounding_boxes), 5+num_classes), 0.0, dtype=torch.float32)
+    label_data = torch.full((*grid_shape, len(anchors), 5+num_classes), 0.0, dtype=torch.float32)
     S = grid_shape[0]
     A = len(anchors)
     occupied = torch.zeros(
@@ -131,7 +131,12 @@ def encode_yolo_target(target, anchors, grid_width, grid_height, grid_shape, num
 
         t_x = g_x - grid_x # position inside cell
         t_y = g_y - grid_y # position inside cell
-        best_anchor = get_sorted_iou_anchors(box, anchors, occupied[grid_y, grid_x, :])
+        box_wh = torch.stack((b_w, b_h))
+        best_anchor = get_sorted_iou_anchors(
+            box_wh,
+            anchors,
+            occupied[grid_y, grid_x, :],
+        )
         if best_anchor == -1:
             print(
                 f"WARNING: no free anchor for "

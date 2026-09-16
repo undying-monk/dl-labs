@@ -8,7 +8,7 @@ from torchmetrics.classification import (
     MulticlassF1Score
 )
 from torchmetrics.detection import MeanAveragePrecision
-from object_detection.yolov2.utils.util import encode_archor, decode_batch_predictions
+from utils.util import encode_archor, decode_batch_predictions
 from torchvision.ops import box_iou
 
 
@@ -302,7 +302,7 @@ def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, sche
     for epoch in range(epochs):
         train_result = train_loop(train_loader, model, loss_fn, optimizer, batch_size, num_classes, device)
         val_result = test_loop(val_loader, model, loss_fn, num_classes, anchors, device) # for evaluate in each epoch
-
+        print(f"Done epoch-{epoch}")
         if val_result['accuracy'] > best_val_accuracy:
             best_val_accuracy = val_result['accuracy']
 

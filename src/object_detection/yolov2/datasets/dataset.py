@@ -2,7 +2,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 import xml.etree.ElementTree as ET
 import torch
-from object_detection.yolov2.utils.util import get_sorted_iou_anchors
+from utils.util import get_sorted_iou_anchors
 from torchvision.transforms import v2
 from torchvision import tv_tensors
 
@@ -300,7 +300,12 @@ class YoloV2GridTransform:
             t_x = (midpoint_x % self.grid_width) / self.grid_width # position inside cell
             t_y = (midpoint_y % self.grid_height) / self.grid_height
     
-            best_anchor = get_sorted_iou_anchors(box, torch.tensor(self.anchors), occupied[grid_y, grid_x, :])
+            box_wh = torch.stack((b_w, b_h))
+            best_anchor = get_sorted_iou_anchors(
+                box_wh,
+                torch.tensor(self.anchors),
+                occupied[grid_y, grid_x, :],
+            )
             if best_anchor == -1:
                 print(
                     f"WARNING: no free anchor for "
