@@ -264,11 +264,9 @@ def test_loop(dataloader, model, loss_fn, num_classes, anchors, device):
                 conf_threshold=0.001,
                 nms_threshold=0.5,
             )
-            metric_labels = decode_batch_predictions(
+            metric_labels = decode_batch_targets(
                 y,
                 anchors,
-                conf_threshold=0.001,
-                nms_threshold=0.5,
             )
             history["map_metric"].update(preds, metric_labels)
 
@@ -380,6 +378,26 @@ def _decode_yolo_boxes(predictions, anchors, stride, apply_sigmoid_to_centers):
         ),
         dim=-1,
     )
+
+
+def decode_batch_targets(targets, anchors, stride=32):
+    """Convert encoded YOLO targets to TorchMetrics ground-truth dictionaries."""
+    target_boxes = _decode_yolo_boxes(
+        targets,
+        anchors,
+        stride,
+        apply_sigmoid_to_centers=False,
+    )
+    object_mask = targets[..., 4] == 1
+    target_labels = targets[..., 5:].argmax(dim=-1)
+
+    return [
+        {
+            "boxes": target_boxes[batch_index][object_mask[batch_index]],
+            "labels": target_labels[batch_index][object_mask[batch_index]],
+        }
+        for batch_index in range(targets.shape[0])
+    ]
 
 
 def wrap_yolo_loss(loss_weight=[1, 1, .5, 1], anchors=None, stride=32, ignore_threshold=0.5):
