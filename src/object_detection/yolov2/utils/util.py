@@ -329,8 +329,8 @@ def decode_batch_predictions(
         # Decode
         # ---------------------------------------------
 
-        tx = pred[:, 0]
-        ty = pred[:, 1]
+        tx = torch.sigmoid(pred[:, 0])
+        ty = torch.sigmoid(pred[:, 1])
         tw = pred[:, 2]
         th = pred[:, 3]
        
@@ -431,6 +431,8 @@ def decode_predictions(
                     continue
 
                 tx, ty, tw, th = pred[:4]
+                tx = torch.sigmoid(tx)
+                ty = torch.sigmoid(ty)
 
                 # --------------------------------
                 # Decode center
