@@ -1,12 +1,9 @@
 from torch.utils.data import Dataset
-import pandas as pd
-import os
 from PIL import Image
 import xml.etree.ElementTree as ET
 import torch
 import math
-import numpy as np
-from util import find_highest_iou_anchor
+from util import get_sorted_iou_anchors
 from torchvision.transforms import v2
 from torchvision import tv_tensors
 
@@ -84,13 +81,13 @@ class VOCDataset(Dataset):
             canvas_size=(height, width),
         )
  
-      
+
         target = {
             'image_id': image_id,
             'labels': labels,
             'boxes': boxes,
         }
-        # print(image_id, labels)
+        # print("image",image_id, len(labels))
         # target = encode_yolo_target(image, target, self.anchors, self.grid_shape, self.num_classes)
         if self.transform:
             image, target = self.transform(
@@ -146,17 +143,18 @@ class VOCDataset(Dataset):
         return boxes, labels
 
 
-# def detection_collate_fn(batch):
-#     images = []
-#     targets = []
+def detection_collate_fn(batch):
+    images = []
+    targets = []
 
-#     for image, target in batch:
-#         images.append(image)
-#         targets.append(target)
+    for image, target in batch:
+        images.append(image)
+        targets.append(target)
 
-#     images = torch.stack(images)
+    images = torch.stack(images, dim=0)
 
-#     return images, targets
+    return images, targets
+
 
 class Letterbox(v2.Transform):
     def __init__(self, size=(416, 416), fill=0):
@@ -269,6 +267,16 @@ class YoloV2GridTransform:
         # 2. Extract values from your dataset item
         bounding_boxes = target["boxes"]
         labels = target["labels"]
+        image_id = target["image_id"]
+        S = self.base_shape[0]
+        A = len(self.anchors)
+        occupied = torch.zeros(
+            S,
+            S,
+            A,
+            dtype=torch.bool,
+            device=bounding_boxes.device,
+        )
         
         # 3. Explicitly set values at the specified indices
         # If indices is a tuple of coordinates (e.g., (row_array, col_array)), 
@@ -293,15 +301,20 @@ class YoloV2GridTransform:
             t_x = (midpoint_x % self.grid_width) / self.grid_width # position inside cell
             t_y = (midpoint_y % self.grid_height) / self.grid_height
     
-            # print("position",t_x,t_y, midpoint_x, midpoint_y, grid_height)
-    
-            # find match anchor box with label bounding box
-            best_anchor, best_iou = find_highest_iou_anchor([b_w,b_h], self.anchors)
-            # print("best_anchor", best_anchor, "best_iou", best_iou, grid_x, grid_y)
+            best_anchor = get_sorted_iou_anchors(box, torch.tensor(self.anchors), occupied[grid_y, grid_x, :])
+            if best_anchor == -1:
+                print(
+                    f"WARNING: no free anchor for "
+                    f"box={box.tolist()}, "
+                    f"class={int(labels[i])}, "
+                    f"cell=({grid_y},{grid_x})"
+                )
+                continue
+            occupied[grid_y, grid_x, best_anchor] = True
 
             # print("bounding box", f"[{b_w:.2f}, {b_h:.2f}]", "- anchor", anchors[best_anchor])
-            t_w = math.log(b_w/self.anchors[best_anchor][0] )
-            t_h = math.log(b_h/self.anchors[best_anchor][1] )
+            t_w = torch.log(b_w/self.anchors[best_anchor][0] )
+            t_h = torch.log(b_h/self.anchors[best_anchor][1] )
     
             # position
             target_tensor[grid_y, grid_x, best_anchor, 0] = t_x 
@@ -315,5 +328,16 @@ class YoloV2GridTransform:
     
             # class
             target_tensor[grid_y, grid_x, best_anchor, 5 + labels[i]] = 1.0
-            # print("label_data", label_data[grid_x, grid_y, best_anchor, :]) 
+
+        # encoded_count = (
+        #     target_tensor[..., 4] == 1
+        # ).sum().item()
+        # gt_count = len(labels)
+
+        # print(
+        #     f"image {image_id}: "
+        #     f"GT={gt_count}, "
+        #     f"diff={gt_count != encoded_count}, "
+        #     f"encoded={encoded_count}"
+        # )
         return target_tensor

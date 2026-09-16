@@ -53,6 +53,23 @@ def iou_anchor(bb,anchor):
     union = bb_area + anchor_area - inter
     return inter / union
 
+def iou_anchors(bb,anchors):
+    inter = torch.minimum(bb[0], anchors[:, 0]) * torch.minimum(bb[1], anchors[:,1])
+    bb_area = bb[0] * bb[1]
+    anchor_area = anchors[:, 0] * anchors[:, 1]
+    union = bb_area + anchor_area - inter
+    return inter / (union + 1e-16)
+
+def get_sorted_iou_anchors(box, anchors, occupied):
+    anchor_ious = iou_anchors(box, anchors)
+    sorted_anchor_idx = torch.argsort(anchor_ious,descending=True)
+    best_anchor = -1
+    for anchor_idx_tensor in sorted_anchor_idx:
+        anchor_idx = int(anchor_idx_tensor.item())
+        if not occupied[anchor_idx]:
+            best_anchor = anchor_idx
+            break
+    return best_anchor
 
 def find_highest_iou_anchor(bounding_box,anchors):
     best_anchor = None
@@ -76,8 +93,16 @@ def encode_yolo_target(target, anchors, grid_width, grid_height, grid_shape, num
     # grid_width = width/grid_shape[1]
 
     # label_data = np.zeros((grid_shape[0],grid_shape[1], len(anchors), 5+num_classes))
-    label_data = torch.full((grid_shape[0],grid_shape[1], len(anchors), 5+num_classes), 0.0, dtype=torch.float32)
-
+    label_data = torch.full((*grid_shape, len(bounding_boxes), 5+num_classes), 0.0, dtype=torch.float32)
+    S = grid_shape[0]
+    A = len(anchors)
+    occupied = torch.zeros(
+        S,
+        S,
+        A,
+        dtype=torch.bool,
+        device=bounding_boxes.device,
+    )
     # print("label_data", label_data.shape, "image_size", image.size) 
     for i, box in enumerate(bounding_boxes):
         xmin = box[0]
@@ -86,32 +111,43 @@ def encode_yolo_target(target, anchors, grid_width, grid_height, grid_shape, num
         ymax = box[3]
 
         # find central point to find grid cell
-        midpoint_x = xmin + (xmax - xmin) /2
-        midpoint_y = ymin + (ymax - ymin) /2
+        midpoint_x = (xmin + xmax) /2
+        midpoint_y = (ymin + ymax) /2
         b_w = (xmax - xmin) / grid_width
         b_h = (ymax - ymin) / grid_height
 
-        grid_x = int(midpoint_x / grid_width)
-        grid_y = int(midpoint_y / grid_height)
+        # grid_x = int(midpoint_x / grid_width)
+        # grid_y = int(midpoint_y / grid_height)
 
         g_x = midpoint_x / grid_width
         g_y = midpoint_y / grid_height
 
+        grid_x = int(torch.floor(g_x).item())
+        grid_y = int(torch.floor(g_y).item())
+        
+        # Clamp against boundary case where cx/cy == image_size
+        grid_x = min(max(grid_x, 0), S - 1)
+        grid_y = min(max(grid_y, 0), S - 1)
+
         t_x = g_x - grid_x # position inside cell
         t_y = g_y - grid_y # position inside cell
+        best_anchor = get_sorted_iou_anchors(box, anchors, occupied[grid_y, grid_x, :])
+        if best_anchor == -1:
+            print(
+                f"WARNING: no free anchor for "
+                f"box={box.tolist()}, "
+                f"class={int(labels[i])}, "
+                f"cell=({grid_y},{grid_x})"
+            )
+            continue
 
-        # print("position",t_x,t_y, midpoint_x, midpoint_y, grid_height)
-
-        # find match anchor box with label bounding box
-        best_anchor, best_iou = find_highest_iou_anchor([b_w,b_h], anchors)
-        # print("best_anchor", best_anchor, g_x, g_y , t_x.item(),t_y.item(), "anchors", anchors[best_anchor])
-        # print(grid_x, grid_y)
+        # print("label index", i, VOC_CLASSES[labels[i]], grid_x, grid_y, "best_anchor", best_anchor)
+        occupied[grid_y, grid_x, best_anchor] = True
 
         # print("bounding box", f"[{b_w:.2f}, {b_h:.2f}]", "- anchor", anchors[best_anchor])
-        t_w = math.log(b_w/anchors[best_anchor][0] )
-        t_h = math.log(b_h/anchors[best_anchor][1] )
-        # print("t_w", t_w, "t_h", t_h)
-
+        t_w = torch.log(b_w/anchors[best_anchor][0] )
+        t_h = torch.log(b_h/anchors[best_anchor][1] )
+        print("encode",t_x.item(), t_y.item(), t_w.item(), t_h.item())
 
         # position
         label_data[grid_y, grid_x, best_anchor, 0] = t_x 
@@ -127,6 +163,8 @@ def encode_yolo_target(target, anchors, grid_width, grid_height, grid_shape, num
         # class
         label_data[grid_y, grid_x, best_anchor, 5 + labels[i]] = 1.0
         # print("label_data", label_data[grid_x, grid_y, best_anchor, :]) 
+
+
     return label_data
 
 # convert [B,Channels, GRID, GRID] into [B, GRID, GRID, num_anchors, 5+num_classes]
@@ -143,6 +181,7 @@ def encode_archor(x, num_anchors, num_classes):
         num_anchors,
         5 + num_classes
     )
+
     return x
 
 
@@ -172,7 +211,6 @@ def decode_batch_predictions(
     C = D - 5
 
     device = predictions.device
-    print("device", device)
     dtype = predictions.dtype
     anchors = torch.from_numpy(anchors).to(device)
 
@@ -187,12 +225,10 @@ def decode_batch_predictions(
     obj_mask = objectness > objectness_threshold
 
     results = []
-    print("obj_mask", obj_mask)
 
     # We still loop over batch because TorchMetrics
     # expects one prediction dict per image.
     for b in range(B):
-
         mask = obj_mask[b]
 
         if not mask.any():
@@ -299,12 +335,12 @@ def decode_batch_predictions(
         ah = anchor_wh[:, 1]
 
         cx = (
-            torch.sigmoid(tx)
+            tx
             + grid_x.to(dtype)
         ) * stride
 
         cy = (
-            torch.sigmoid(ty)
+            ty
             + grid_y.to(dtype)
         ) * stride
 
@@ -350,206 +386,17 @@ def decode_batch_predictions(
     return results
 
 
-def decode_batch_predictions2(
-    prediction,
-    anchors,
-    device,
-    stride=32,
-    conf_threshold=0.3,
-    nms_threshold=.5,
-):
-    """
-    prediction:
-        [B, 13, 13, 5, 25]
-
-    anchors:
-        [(aw, ah), ...]
-
-    returns:
-        boxes  [N, 4]
-        scores [N]
-        labels [N]
-    """
-
-    B = prediction.shape[0]
-    S = prediction.shape[1]
-    num_anchors = prediction.shape[3]
-
-    boxes = []
-    scores = []
-    labels = []
-    print("prediction")
-    
-    # no object found
-    objectness = prediction[..., 4]
-    no_obj_mask = objectness == 0
-    obj_mask = objectness == 1
-    print("objectness", obj_mask.shape)
-    # print("prediction[..., :4]", prediction[..., :4], prediction[..., :4].shape)
-
-
-    tx = prediction[..., 0]
-    print("tx", tx)
-    ty = prediction[..., 1]
-    tw = prediction[..., 2]
-    th = prediction[..., 3]
-    classes = prediction[..., 5:]
-    print("classes", classes)
-
-    # --------------------------------
-    # Decode center
-    # --------------------------------
-
-    x = torch.arange(
-        13,
-        device=device,
-        dtype=torch.float32,
-    )
-
-    y = torch.arange(
-        13,
-        device=device,
-        dtype=torch.float32,
-    )
-
-    # [S, S]
-    grid_y, grid_x = torch.meshgrid(
-        y,
-        x,
-        indexing="ij",
-    )
-    print("[S, S]", grid_y.shape)
-
-
-    # [1, S, S, 1]
-    grid_x = grid_x[None, :, :, None]
-    grid_y = grid_y[None, :, :, None]
-
-    cx = (tx + grid_x) * stride
-    cy = (ty + grid_y) * stride
-
-    # print("decoded cx cy", cx.item(), tx, gx, cy.item(), tx.item(), ty.item(), gy, gx)
-
-
-    # --------------------------------
-    # Decode size
-    # --------------------------------
-
-    print("Decode size")
-    anchor_w = anchors[:, 0].view([1, 1, 1, num_anchors])
-    anchor_h = anchors[:, 1].view([1, 1, 1, num_anchors])
-    print(anchor_w)
-    print(anchor_h)
-    # tw = log(bw/anchors[best_anchor])
-    # bw = anchors[best_anchor] * e^(tw) * grid_width
-
-    w = (
-        torch.exp(tw)
-        * anchor_w
-        * stride
-    )
-
-    h = (
-        torch.exp(th)
-        * anchor_h
-        * stride
-    )
-
-    print("decoded wh")
-
-    # --------------------------------
-    # xywh -> xyxy
-    # --------------------------------
-
-    xmin = cx - (w / 2)
-    ymin = cy - (h / 2)
-    xmax = cx + (w / 2)
-    ymax = cy + (h / 2)
-
-    box = torch.stack([
-        xmin,
-        ymin,
-        xmax,
-        ymax,
-    ], dim=-1)
-    # [B, S, S, A, 4]
-
-    # --------------------------------
-    # Objectness
-    # --------------------------------
-
-    objectness = torch.sigmoid(
-        objectness
-    )
-    
-
-    # --------------------------------
-    # Classes
-    # --------------------------------
-
-    class_probs = torch.sigmoid(
-        classes
-    )
-
-
-    class_prob, class_id = torch.max(
-        class_probs,
-        dim=-1
-    )
-
-    # --------------------------------
-    # Final confidence
-    # --------------------------------
-
-    confidence = (
-        objectness * class_prob
-    )
-    results = []
-    for b in range(B):
-        if confidence[b] >= conf_threshold:
-            boxes_b = box[b]
-            scores_b = confidence[b]
-            labels_b = class_id[b]
-
-        if boxes.numel() == 0:
-            results.append(
-                torch.empty((0, 4)),
-                torch.empty((0,)),
-                torch.empty((0,), dtype=torch.long),
-            )
-            continue
-
-        boxes_b = boxes_b.reshape(-1,4),
-        scores_b = scores_b.reshape(-1),
-        labels_b = labels_b.reshape(-1),
-        keep_nms = batched_nms(
-           boxes_b,
-           scores_b,
-           labels_b,
-           nms_threshold,
-        )
-
-        results.append({
-            "boxes": boxes_b[keep_nms],
-            "scores": scores_b[keep_nms],
-            "labels": labels_b[keep_nms],
-        })
-
-    return (
-        torch.stack(boxes),
-        torch.stack(scores),
-        torch.stack(labels),
-    )
-
 def decode_predictions(
     prediction,
     anchors,
     stride=32,
     conf_threshold=.3,
+    iou_threshold=.5,
+    enable_nms=False,
 ):
     """
     prediction:
-        [B, 13, 13, 5, 25]
+        [ 13, 13, 5, 25]
 
     anchors:
         [(aw, ah), ...]
@@ -570,11 +417,10 @@ def decode_predictions(
     for gy in range(S):
         for gx in range(S):
             for anchor_idx in range(num_anchors):
-
                 pred = prediction[
                     gy, gx, anchor_idx
                 ]
-
+                
                 # no object found
                 if pred[4] == 0:
                     continue
@@ -588,7 +434,7 @@ def decode_predictions(
                 cx = (tx + gx) * stride
                 cy = (ty + gy) * stride
 
-                # print("decoded cx cy", cx.item(), tx, gx, cy.item(), tx.item(), ty.item(), gy, gx)
+                print("decode", tx.item(), ty.item(), tw.item(), th.item())
 
 
                 # --------------------------------
@@ -611,8 +457,6 @@ def decode_predictions(
                     * anchor_h
                     * stride
                 )
-
-                # print("decoded wh", w.item(), h.item())
 
                 # --------------------------------
                 # xywh -> xyxy
@@ -666,13 +510,20 @@ def decode_predictions(
                     scores.append(confidence)
                     labels.append(class_id)
 
+
     if len(boxes) == 0:
         return (
             torch.empty((0, 4)),
             torch.empty((0,)),
             torch.empty((0,), dtype=torch.long),
         )
-
+    if enable_nms:
+        return apply_nms(
+            torch.stack(boxes),
+            torch.stack(scores),
+            torch.stack(labels),
+            iou_threshold,
+        )
     return (
         torch.stack(boxes),
         torch.stack(scores),
@@ -700,12 +551,10 @@ def apply_nms(
 def denormalize(image):
     mean = torch.tensor(
         [0.485, 0.456, 0.406],
-        device=image.device,
     ).view(3, 1, 1)
 
     std = torch.tensor(
         [0.229, 0.224, 0.225],
-        device=image.device,
     ).view(3, 1, 1)
 
     return image * std + mean
@@ -744,7 +593,6 @@ def plot_anchors(anchors):
     cy = 0.5
 
     ax.plot(cx, cy, marker="o")
-
 
     # Draw anchors shape
     for i, (aw, ah) in enumerate(anchors):

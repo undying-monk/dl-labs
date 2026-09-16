@@ -1,11 +1,16 @@
-import numpy as np
 import torch
 from torch import nn
-from torchvision import datasets, models, transforms
-from torch.optim import lr_scheduler
-from torch.utils.data import Dataset, DataLoader
-import math
-from util import decode_predictions, encode_archor, decode_batch_predictions
+import torch.nn.functional as F
+from torchmetrics.classification import (
+    MulticlassAccuracy,
+    MulticlassPrecision,
+    MulticlassRecall,
+    MulticlassF1Score
+)
+from torchmetrics.detection import MeanAveragePrecision
+from util import encode_archor, decode_batch_predictions
+from torchvision.ops import box_iou
+
 
 class ConvBlock(nn.Module):
     """Standard Convolution -> Batch Normalization -> Leaky ReLU block"""
@@ -151,16 +156,21 @@ class YOLOv2(nn.Module):
         return x
 
 
-def train_loop(dataloader, model, loss_fn, optimizer, batch_size, device):
+def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, device):
     num_batches = len(dataloader)
     size = len(dataloader.dataset)
 
     train_correct, train_loss = 0, 0
+    history = {
+        "correct": 0,
+        "loss": 0,
+        "accuracy": MulticlassAccuracy(num_classes=num_classes, average="macro").to(device),
+    }
 
     model.train()
     for batch , (x, y) in enumerate(dataloader):
         print(f"train_loop-{batch}")
-        # if batch == 1:
+        # if batch == 5:
         #     break
 
         x = x.to(device)
@@ -177,19 +187,21 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, device):
         optimizer.zero_grad() # reset grad, since it accumulate grad each batch
 
         train_loss += loss.item()
-
-        # Get the index of the highest probability, dim=-1 apply for last dimension which is num_classes
-        # prediction = pred.argmax(dim=-1)
-        # print(prediction.shape, y.shape)
-
         obj_mask = y[..., 4] == 1
+
+        pred_obj = torch.sigmoid(pred[..., 4])
+        print("positive objectness:", pred_obj[obj_mask].mean().item())
+        print("background objectness:", pred_obj[~obj_mask].mean().item())
+
         pred_class = pred[..., 5:][obj_mask]   # [N_objects, num_classes]
         true_class = y[..., 5:][obj_mask]       # one-hot, [N_objects, num_classes]
         pred_class_id = pred_class.argmax(dim=-1)
         true_class_id = true_class.argmax(dim=-1)
+        history["accuracy"].update(pred_class_id, true_class_id)
 
         # sum all corrects prediction among anchor boxes and item() convert into float32 
         train_correct += (pred_class_id == true_class_id).sum().item()
+        size += true_class_id.numel()
 
         if batch % 100 == 0:
             loss, current = loss.item(), batch * batch_size + len(x)
@@ -197,17 +209,34 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, device):
 
     train_correct /= size
     train_loss  /= num_batches
-    return train_correct, train_loss
+    history["loss"] = train_loss
+    history["correct"] = train_correct
+    history["accuracy"] = history["accuracy"].compute().item()
+    return history
 
-def test_loop(dataloader, model, loss_fn, device):
+
+
+def test_loop(dataloader, model, loss_fn, num_classes, anchors, device):
     model.eval()
     test_correct, test_loss = 0, 0
     num_batches = len(dataloader)
-    size = len(dataloader.dataset)
-    y_pred, labels = [], []
+    size = 0
+    history = {
+        "correct": 0,
+        "loss": 0,
+        "accuracy": MulticlassAccuracy(num_classes=num_classes, average="macro").to(device),
+        "precision": MulticlassPrecision(num_classes=num_classes, average="macro").to(device),
+        "recall":  MulticlassRecall(num_classes=num_classes, average="macro").to(device),
+        "f1": MulticlassF1Score(num_classes=num_classes,average="macro").to(device),
+        "map_metric": MeanAveragePrecision(box_format="xyxy",iou_type="bbox").to(device),
+    }
 
     with torch.no_grad():
-        for X, y in dataloader: # run each batch
+        for batch , (X, y) in enumerate(dataloader):
+            print(f"test_loop-{batch}")
+
+            # if batch == 5:
+            #     break
             X = X.to(device)
             y = y.to(device)
             pred = model(X)
@@ -220,145 +249,263 @@ def test_loop(dataloader, model, loss_fn, device):
             pred_class_id = pred_class.argmax(dim=-1)
             true_class_id = true_class.argmax(dim=-1)
 
+            history["accuracy"].update(pred_class_id, true_class_id)
+            history["precision"].update(pred_class_id, true_class_id)
+            history["recall"].update(pred_class_id, true_class_id)
+            history["f1"].update(pred_class_id, true_class_id)
+
             # sum all corrects prediction among anchor boxes and item() convert into float32 
             test_correct += (pred_class_id == true_class_id).sum().item() # sum predictions of each batch
-            
-            y_pred.append(pred)
-            labels.append(y)
+            size += true_class_id.numel()
+
+            preds = decode_batch_predictions(
+                pred,
+                anchors,
+                conf_threshold=0.001,
+                nms_threshold=0.5,
+            )
+            metric_labels = decode_batch_predictions(
+                y,
+                anchors,
+                conf_threshold=0.001,
+                nms_threshold=0.5,
+            )
+            history["map_metric"].update(preds, metric_labels)
 
     test_loss /= num_batches
     test_correct /= size
-    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_correct:.4f}")
 
-    return test_correct, test_loss, (torch.cat(y_pred, dim=0), torch.cat(labels, dim=0))
+    history["map_metric"] = history["map_metric"].compute()
+    history["correct"] = test_correct
+    history["accuracy"] = history["accuracy"].compute().item()
+    history["loss"] = test_loss
+    history["precision"] = history["precision"].compute().item()
+    history["recall"] = history["recall"].compute().item()
+    history["f1"] = history["f1"].compute().item()
+    # print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_correct:.4f}")
 
-def validate_model(epochs, model, val_loader, loss_fn, optimizer, scheduler,device, anchors, metric):
-    history = {
-        "val_acc": [],
-        "val_loss": [],
-        "metrics": metric
-    }
-    best_val_correct = 0.0
-    metric.reset()
-    preds = []
-    metric_labels = []
-    for epoch in range(epochs):
-        val_correct,val_loss, (y_pred, y) = test_loop(val_loader, model, loss_fn, device) # for evaluate in each epoch
-        print(y_pred.shape, y.shape)
-        history["val_acc"].append(val_correct)
-        history["val_loss"].append(val_loss)
-
-        preds = decode_batch_predictions(
-            y_pred,
-            anchors,
-            conf_threshold=0.001,
-            nms_threshold=0.5,
-        )
-        metric_labels = decode_batch_predictions(
-            y_pred,
-            anchors,
-            conf_threshold=0.001,
-            nms_threshold=0.5,
-        )
-        print("decode_batch_predictions", preds)
-
-
-        # -----------------------
-        # Save best model
-        # -----------------------
-        if val_correct > best_val_correct:
-            best_val_correct = val_correct
-
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict()
-                    if scheduler is not None else None,
-                "val_loss": val_loss,
-                "val_acc": val_correct,
-            }, "save/stage1_latest.pth")
-
-        # scheduler.step()
-        print("Done! Validation")
-
-
-    metric.update(preds, metric_labels)
-    history["metrics"] = metric.compute()   
     return history
 
-def train_model(epochs, model, train_loader, loss_fn, optimizer, scheduler, batch_size, device):
+def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, scheduler, batch_size, num_classes, anchors, device):
+    best_val_accuracy = 0.0
+
     history = {
         "train_acc": [],
+        "train_correct": [],
         "train_loss": [],
+        "val_acc": [],
+        "val_correct": [],
+        "val_loss": [],
+        "map_metric": [],
     }
-    best_train_correct = 0.0
-    preds = []
-    metric_labels = []
+
     for epoch in range(epochs):
+        train_result = train_loop(train_loader, model, loss_fn, optimizer, batch_size, num_classes, device)
+        val_result = test_loop(val_loader, model, loss_fn, num_classes, anchors, device) # for evaluate in each epoch
 
-        train_correct,train_loss = train_loop(train_loader, model, loss_fn, optimizer, batch_size, device)
-        print("train_correct", train_correct, train_loss)
-        history["train_acc"].append(train_correct)
-        history["train_loss"].append(train_loss)
-
-
-        # for batch_index in range(y_pred.shape[0]):
-        #     print("batch_index", batch_index)
-
-        #     pred_boxes, pred_scores, pred_labels  = decode_predictions(y_pred[batch_index], anchors)
-        #     boxes, _, labels  = decode_predictions(y[batch_index], anchors)
-        #     metric_labels.append({
-        #         "boxes": boxes.float(),
-        #         "labels": labels.long(),
-        #     })
-        #     preds.append( {
-        #             "boxes": pred_boxes,
-        #             "scores": pred_scores,
-        #             "labels": pred_labels,
-        #     })
-
-        # -----------------------
-        # Save best model
-        # -----------------------
-        if train_correct > best_train_correct:
-            best_train_correct = train_correct
+        if val_result['accuracy'] > best_val_accuracy:
+            best_val_accuracy = val_result['accuracy']
 
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict()
-                    if scheduler is not None else None,
+                "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+                "best_val_accuracy": best_val_accuracy,
             }, "save/stage1_latest.pth")
 
         # scheduler.step()
-        print("Done! Train")
+        print(
+            f"[{epoch+1}/{epochs}] "
+            f"train_loss={train_result['loss']:.4f} "
+            f"train_correct={train_result['correct']:.4f} "
+            f"train_acc={train_result['accuracy']:.4f} "
+            f"val_loss={val_result['loss']:.4f} "
+            f"val_correct={val_result['correct']:.4f} "
+            f"val_acc={val_result['accuracy']:.4f} "
+            f"val_mAP={val_result['map_metric']} "
+            # f"val_mAP50={val_result['map_metric']['map50']:.4f}"
+        )
+        history["train_acc"].append(train_result["accuracy"]) # average accuracy among all classes
+        history["train_correct"].append(train_result["correct"]) # average by total objects
+        history["train_loss"].append(train_result["loss"])
+        history["val_acc"].append(val_result["accuracy"]) # average accuracy among all classes
+        history["val_correct"].append(val_result["correct"])  # average by total objects
+        history["val_loss"].append(val_result["loss"])  # average by total objects
+        history["map_metric"].append(val_result["map_metric"])
+
+    print("Done epoch training !!!")
     return history
 
-def wrap_yolo_loss(loss_weight=[1, 1, 1, 1]):
+def wrap_yolo_loss(loss_weight=[1, 1, .5, 1]):
     def yolo_loss(y_pred, y_true):
         # L box + L class score
         # shape of y label is B, W, H, num_anchors, 5+num_classes
         # shape of y label value is tx,ty, tw,th, objectness, classes ..
-        filter = y_true[...,4] == 1 # objectness == 1
-        no_obj_filter = y_true[...,4] == 0 # objectness == 1
+        obj_mask = y_true[...,4] == 1 # objectness == 1
 
-        loss_boxes = nn.MSELoss()(y_pred[...,:4][filter], y_true[...,:4][filter])
-        loss_obj = nn.BCEWithLogitsLoss()(y_pred[..., 4][filter], y_true[..., 4][filter])
-        loss_no_obj = nn.BCEWithLogitsLoss()(y_pred[..., 4][no_obj_filter], y_true[..., 4][no_obj_filter])
+        # ignore_mask = compute_ignore_mask(
+        #     pred_boxes= y_pred[...,0:4],
+        #     gt_boxes=y_true[...,0:4],
+        #     ignore_threshold=.5,
+        # )
+        no_obj_mask = y_true[...,4] == 0# objectness == 1
 
-        pred_class = y_pred[..., 5:][filter]   # [N_objects, num_classes]
-        true_class = y_true[..., 5:][filter]       # one-hot, [N_objects, num_classes]
-        loss_class_scores = nn.BCEWithLogitsLoss(reduction="sum")(pred_class, true_class)
+        loss_obj, loss_no_obj, loss_boxes, loss_class_scores = y_pred.new_tensor(0.0), y_pred.new_tensor(0.0), y_pred.new_tensor(0.0), y_pred.new_tensor(0.0)
+
+        pred_tx = torch.sigmoid(y_pred[..., 0])
+        pred_ty = torch.sigmoid(y_pred[..., 1])
+        target_tx = y_true[..., 0]
+        target_ty = y_true[..., 1]
+
+        if obj_mask.any():
+            loss_boxes = F.mse_loss(y_pred[...,:4][obj_mask], y_true[...,:4][obj_mask], reduction="mean")
+
+            loss_obj = F.binary_cross_entropy_with_logits(y_pred[..., 4][obj_mask], y_true[..., 4][obj_mask], reduction="mean")
+            loss_xy = (
+                F.mse_loss(
+                    pred_tx[obj_mask],
+                    target_tx[obj_mask],
+                    reduction="mean",
+                )
+                +
+                F.mse_loss(
+                    pred_ty[obj_mask],
+                    target_ty[obj_mask],
+                    reduction="mean",
+                )
+            )
+            loss_wh = F.mse_loss(y_pred[...,2:4][obj_mask], y_true[...,2:4][obj_mask],reduction="mean")
+            loss_boxes = loss_xy + loss_wh
+
+        if no_obj_mask.any():
+            loss_no_obj = F.binary_cross_entropy_with_logits(y_pred[..., 4][no_obj_mask], y_true[..., 4][no_obj_mask], reduction="mean")
+            noobj_logits = y_pred[..., 4][no_obj_mask]
+            noobj_probs = torch.sigmoid(noobj_logits)
+            print("noobj count:", noobj_logits.numel())
+            print("noobj logits mean:", noobj_logits.mean().item())
+            print("noobj logits min :", noobj_logits.min().item())
+            print("noobj logits max :", noobj_logits.max().item())
+            print("noobj prob mean  :", noobj_probs.mean().item())
+            print("noobj prob min   :", noobj_probs.min().item())
+            print("noobj prob max   :", noobj_probs.max().item())
+
+            print(
+                "loss_noobj:",
+                F.binary_cross_entropy_with_logits(
+                    noobj_logits,
+                    torch.zeros_like(noobj_logits),
+                ).item()
+            )
+
+        pred_class = y_pred[..., 5:][obj_mask]   # [N_objects, num_classes]
+        true_class = y_true[..., 5:][obj_mask]       # one-hot, [N_objects, num_classes]
+        loss_class_scores = F.binary_cross_entropy_with_logits(pred_class, true_class, reduction="mean")
 
         # get max probabilities on each anchor box
-        true_class_id = y_true.argmax(dim=-1)
-        pred_class_id = y_pred.argmax(dim=-1)
-
+        # true_class_id = y_true.argmax(dim=-1)
+        # pred_class_id = y_pred.argmax(dim=-1)
         # sum all max probabilities and convert tensor into float32 
-        correct = (pred_class_id == true_class_id).sum().item()
-        total_loss = loss_weight[0] * loss_boxes + loss_weight[1] * loss_obj + loss_weight[2] * loss_no_obj + loss_weight[3] * loss_class_scores
+        # correct = (pred_class_id == true_class_id).sum().item()
 
+        total_loss = loss_weight[0] * loss_boxes + loss_weight[1] * loss_obj + loss_weight[2] * loss_no_obj + loss_weight[3] * loss_class_scores
+        print(
+            loss_boxes.item(),
+            loss_obj.item(),
+            loss_no_obj.item(),
+            loss_class_scores.item(),
+        )
         return total_loss
     return yolo_loss
+
+def compute_ignore_mask(
+    pred_boxes,
+    gt_boxes,
+    ignore_threshold=0.5,
+):
+    """
+    Compute YOLOv2 ignore mask.
+
+    Args:
+        pred_boxes:
+            Decoded predicted boxes.
+            Shape: [B, S, S, A, 4]
+            Format: [x1, y1, x2, y2]
+
+        gt_boxes:
+            List of GT boxes, one tensor per image.
+            gt_boxes[i].shape = [N_gt_i, 4]
+            Format: [x1, y1, x2, y2]
+
+        ignore_threshold:
+            Predictions with IoU >= this threshold against ANY GT
+            are ignored for no-objectness loss.
+
+    Returns:
+        ignore_mask:
+            Shape: [B, S, S, A]
+            True  = ignore no-objectness loss
+            False = normal object/background handling
+    """
+
+    B, S, _, A, _ = pred_boxes.shape
+
+    ignore_mask = torch.zeros(
+        (B, S, S, A),
+        dtype=torch.bool,
+        device=pred_boxes.device,
+    )
+
+    for b in range(B):
+
+        # ---------------------------------------------------------
+        # Predicted boxes for this image
+        # [S, S, A, 4] -> [S*S*A, 4]
+        # ---------------------------------------------------------
+        pred_boxes_b = pred_boxes[b].reshape(-1, 4)
+        gt_boxes_b = gt_boxes[b].reshape(-1, 4)
+
+        # ---------------------------------------------------------
+        # Ground-truth boxes for this image
+        # [N_gt, 4]
+        # ---------------------------------------------------------
+        gt_boxes_b = gt_boxes_b.to(pred_boxes.device)
+
+        # No GT objects -> nothing to ignore
+        if gt_boxes_b.numel() == 0:
+            continue
+
+        # ---------------------------------------------------------
+        # Pairwise IoU
+        #
+        # [845, 4] x [N_gt, 4]
+        #        ↓
+        # [845, N_gt]
+        # ---------------------------------------------------------
+        iou_matrix = box_iou(
+            pred_boxes_b,
+            gt_boxes_b,
+        )
+
+        # ---------------------------------------------------------
+        # For each prediction, find its maximum IoU
+        # against ANY GT box.
+        #
+        # [845, N_gt]
+        #       ↓ max(dim=1)
+        # [845]
+        # ---------------------------------------------------------
+        max_iou = iou_matrix.max(dim=1).values
+        # ---------------------------------------------------------
+        # Ignore predictions that overlap sufficiently with
+        # at least one GT object.
+        #
+        # [845]
+        #       ↓
+        # [S, S, A]
+        # ---------------------------------------------------------
+        ignore_mask[b] = (
+            max_iou >= ignore_threshold
+        ).reshape(S, S, A)
+
+    return ignore_mask
