@@ -298,8 +298,24 @@ def load_checkpoint(path, model, optimizer=None, scheduler=None, map_location=No
     return checkpoint
 
 
-def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, scheduler, batch_size, num_classes, anchors, device):
+def train_model(
+    epochs,
+    model,
+    train_loader,
+    val_loader,
+    loss_fn,
+    optimizer,
+    scheduler,
+    batch_size,
+    num_classes,
+    anchors,
+    device,
+    checkpoint_path="save/latest.pth",
+    best_checkpoint_path="save/best.pth",
+    resume=True,
+):
     best_val_map = 0.0
+    start_epoch = 0
 
     history = {
         "train_acc": [],
@@ -313,23 +329,28 @@ def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, sche
         "map_metric": [],
     }
 
-    for epoch in range(epochs):
+    if resume and Path(checkpoint_path).is_file():
+        checkpoint = load_checkpoint(
+            checkpoint_path,
+            model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            map_location=device,
+        )
+        start_epoch = checkpoint["epoch"] + 1
+        checkpoint_metrics = checkpoint["metrics"]
+        best_val_map = checkpoint_metrics.get("best_val_map", 0.0)
+        history = checkpoint_metrics.get("history", history)
+        print(f"Resuming training from epoch {start_epoch}.")
+
+    for epoch in range(start_epoch, epochs):
         train_result = train_loop(train_loader, model, loss_fn, optimizer, batch_size, num_classes, device)
         val_result = test_loop(val_loader, model, loss_fn, num_classes, anchors, device) # for evaluate in each epoch
         print(f"Done epoch-{epoch}")
-        if val_result['map'] > best_val_map:
+        is_best = val_result["map"] > best_val_map
+        if is_best:
             best_val_map = val_result['map']
 
-            save_checkpoint(
-                "save/stage1_latest.pth",
-                epoch,
-                model,
-                optimizer,
-                scheduler,
-                metrics={"best_val_map": best_val_map},
-            )
-
-        # scheduler.step()
         print(
             f"[{epoch+1}/{epochs}] "
             f"train_loss={train_result['loss']:.4f} "
@@ -349,6 +370,31 @@ def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, sche
         history["val_map_75"].append(val_result["map_75"])
         history["val_mar_100"].append(val_result["mar_100"])
         history["map_metric"].append(val_result["map_metric"])
+
+        if scheduler is not None:
+            scheduler.step()
+
+        checkpoint_metrics = {
+            "best_val_map": best_val_map,
+            "history": history,
+        }
+        save_checkpoint(
+            checkpoint_path,
+            epoch,
+            model,
+            optimizer,
+            scheduler,
+            metrics=checkpoint_metrics,
+        )
+        if is_best:
+            save_checkpoint(
+                best_checkpoint_path,
+                epoch,
+                model,
+                optimizer,
+                scheduler,
+                metrics=checkpoint_metrics,
+            )
 
     print("Done epoch training !!!")
     return history
