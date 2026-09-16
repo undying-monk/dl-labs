@@ -337,19 +337,85 @@ def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, sche
     print("Done epoch training !!!")
     return history
 
-def wrap_yolo_loss(loss_weight=[1, 1, .5, 1]):
+def _decode_yolo_boxes(predictions, anchors, stride, apply_sigmoid_to_centers):
+    """Decode YOLO grid predictions or targets into XYXY pixel boxes."""
+    _, grid_height, grid_width, num_anchors, _ = predictions.shape
+    anchors = torch.as_tensor(
+        anchors,
+        device=predictions.device,
+        dtype=predictions.dtype,
+    )
+
+    if anchors.shape != (num_anchors, 2):
+        raise ValueError(
+            "anchors must have shape "
+            f"({num_anchors}, 2), got {tuple(anchors.shape)}"
+        )
+
+    grid_y, grid_x = torch.meshgrid(
+        torch.arange(grid_height, device=predictions.device, dtype=predictions.dtype),
+        torch.arange(grid_width, device=predictions.device, dtype=predictions.dtype),
+        indexing="ij",
+    )
+    grid_x = grid_x.view(1, grid_height, grid_width, 1)
+    grid_y = grid_y.view(1, grid_height, grid_width, 1)
+
+    tx = predictions[..., 0]
+    ty = predictions[..., 1]
+    if apply_sigmoid_to_centers:
+        tx = torch.sigmoid(tx)
+        ty = torch.sigmoid(ty)
+
+    center_x = (tx + grid_x) * stride
+    center_y = (ty + grid_y) * stride
+    width = torch.exp(predictions[..., 2]) * anchors[:, 0].view(1, 1, 1, num_anchors) * stride
+    height = torch.exp(predictions[..., 3]) * anchors[:, 1].view(1, 1, 1, num_anchors) * stride
+
+    return torch.stack(
+        (
+            center_x - width / 2,
+            center_y - height / 2,
+            center_x + width / 2,
+            center_y + height / 2,
+        ),
+        dim=-1,
+    )
+
+
+def wrap_yolo_loss(loss_weight=[1, 1, .5, 1], anchors=None, stride=32, ignore_threshold=0.5):
+    if anchors is None:
+        raise ValueError("anchors are required to compute the YOLO ignore mask")
+
     def yolo_loss(y_pred, y_true):
         # L box + L class score
         # shape of y label is B, W, H, num_anchors, 5+num_classes
         # shape of y label value is tx,ty, tw,th, objectness, classes ..
         obj_mask = y_true[...,4] == 1 # objectness == 1
 
-        # ignore_mask = compute_ignore_mask(
-        #     pred_boxes= y_pred[...,0:4],
-        #     gt_boxes=y_true[...,0:4],
-        #     ignore_threshold=.5,
-        # )
-        no_obj_mask = y_true[...,4] == 0# objectness == 1
+        with torch.no_grad():
+            pred_boxes = _decode_yolo_boxes(
+                y_pred.detach(),
+                anchors,
+                stride,
+                apply_sigmoid_to_centers=True,
+            )
+            target_boxes = _decode_yolo_boxes(
+                y_true,
+                anchors,
+                stride,
+                apply_sigmoid_to_centers=False,
+            )
+            gt_boxes = [
+                target_boxes[batch_index][obj_mask[batch_index]]
+                for batch_index in range(y_true.shape[0])
+            ]
+            ignore_mask = compute_ignore_mask(
+                pred_boxes,
+                gt_boxes,
+                ignore_threshold,
+            )
+
+        no_obj_mask = (y_true[..., 4] == 0) & ~ignore_mask
 
         loss_obj, loss_no_obj, loss_boxes, loss_class_scores = y_pred.new_tensor(0.0), y_pred.new_tensor(0.0), y_pred.new_tensor(0.0), y_pred.new_tensor(0.0)
 
@@ -448,10 +514,10 @@ def compute_ignore_mask(
             False = normal object/background handling
     """
 
-    B, S, _, A, _ = pred_boxes.shape
+    B, grid_height, grid_width, A, _ = pred_boxes.shape
 
     ignore_mask = torch.zeros(
-        (B, S, S, A),
+        (B, grid_height, grid_width, A),
         dtype=torch.bool,
         device=pred_boxes.device,
     )
@@ -460,7 +526,7 @@ def compute_ignore_mask(
 
         # ---------------------------------------------------------
         # Predicted boxes for this image
-        # [S, S, A, 4] -> [S*S*A, 4]
+            # [H, W, A, 4] -> [H*W*A, 4]
         # ---------------------------------------------------------
         pred_boxes_b = pred_boxes[b].reshape(-1, 4)
         gt_boxes_b = gt_boxes[b].reshape(-1, 4)
@@ -502,10 +568,10 @@ def compute_ignore_mask(
         #
         # [845]
         #       ↓
-        # [S, S, A]
+        # [H, W, A]
         # ---------------------------------------------------------
         ignore_mask[b] = (
             max_iou >= ignore_threshold
-        ).reshape(S, S, A)
+        ).reshape(grid_height, grid_width, A)
 
     return ignore_mask

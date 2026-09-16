@@ -33,3 +33,14 @@ Follow the existing project structure and patterns.
 * Reuse existing utilities before creating new ones.
 * Do not change model architecture or training behavior unless requested.
 * Do not introduce new dependencies unless necessary.
+
+## Completion
+
+Before considering a task complete:
+
+Ensure the implementation is consistent with the existing architecture.
+Run relevant checks/tests.
+Review the final diff for unintended changes.
+Keep unrelated files unchanged.
+
+Do not create commits unless explicitly requested.
