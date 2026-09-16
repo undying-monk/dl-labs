@@ -130,7 +130,7 @@ class YOLOv2(nn.Module):
         ])
         self.stage7 = nn.ModuleList([
             ConvBlock(1280, 1024, 3, 1), # 13x13
-            ConvBlock(1024, num_anchors*(5+num_classes), 1, 1)    # output layer # 13x13
+            nn.Conv2d(1024, num_anchors*(5+num_classes), 1, 1),  # output logits # 13x13
         ])
         self.num_anchors = num_anchors
         self.num_classes = num_classes
