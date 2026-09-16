@@ -3,9 +3,6 @@ from torch import nn
 import torch.nn.functional as F
 from torchmetrics.classification import (
     MulticlassAccuracy,
-    MulticlassPrecision,
-    MulticlassRecall,
-    MulticlassF1Score
 )
 from torchmetrics.detection import MeanAveragePrecision
 from utils.util import encode_archor, decode_batch_predictions
@@ -219,16 +216,10 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, d
 
 def test_loop(dataloader, model, loss_fn, num_classes, anchors, device):
     model.eval()
-    test_correct, test_loss = 0, 0
+    test_loss = 0
     num_batches = len(dataloader)
-    size = 0
     history = {
-        "correct": 0,
         "loss": 0,
-        "accuracy": MulticlassAccuracy(num_classes=num_classes, average="macro").to(device),
-        "precision": MulticlassPrecision(num_classes=num_classes, average="macro").to(device),
-        "recall":  MulticlassRecall(num_classes=num_classes, average="macro").to(device),
-        "f1": MulticlassF1Score(num_classes=num_classes,average="macro").to(device),
         "map_metric": MeanAveragePrecision(box_format="xyxy",iou_type="bbox").to(device),
     }
 
@@ -244,21 +235,6 @@ def test_loop(dataloader, model, loss_fn, num_classes, anchors, device):
             test_loss += loss_fn(pred, y).item()
             # prediction = pred.argmax(1)
 
-            obj_mask = y[..., 4] == 1
-            pred_class = pred[..., 5:][obj_mask]   # [N_objects, num_classes]
-            true_class = y[..., 5:][obj_mask]       # one-hot, [N_objects, num_classes]
-            pred_class_id = pred_class.argmax(dim=-1)
-            true_class_id = true_class.argmax(dim=-1)
-
-            history["accuracy"].update(pred_class_id, true_class_id)
-            history["precision"].update(pred_class_id, true_class_id)
-            history["recall"].update(pred_class_id, true_class_id)
-            history["f1"].update(pred_class_id, true_class_id)
-
-            # sum all corrects prediction among anchor boxes and item() convert into float32 
-            test_correct += (pred_class_id == true_class_id).sum().item() # sum predictions of each batch
-            size += true_class_id.numel()
-
             preds = decode_batch_predictions(
                 pred,
                 anchors,
@@ -272,29 +248,27 @@ def test_loop(dataloader, model, loss_fn, num_classes, anchors, device):
             history["map_metric"].update(preds, metric_labels)
 
     test_loss /= num_batches
-    test_correct /= size
-
     history["map_metric"] = history["map_metric"].compute()
-    history["correct"] = test_correct
-    history["accuracy"] = history["accuracy"].compute().item()
     history["loss"] = test_loss
-    history["precision"] = history["precision"].compute().item()
-    history["recall"] = history["recall"].compute().item()
-    history["f1"] = history["f1"].compute().item()
-    # print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_correct:.4f}")
+    history["map"] = history["map_metric"]["map"].item()
+    history["map_50"] = history["map_metric"]["map_50"].item()
+    history["map_75"] = history["map_metric"]["map_75"].item()
+    history["mar_100"] = history["map_metric"]["mar_100"].item()
 
     return history
 
 def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, scheduler, batch_size, num_classes, anchors, device):
-    best_val_accuracy = 0.0
+    best_val_map = 0.0
 
     history = {
         "train_acc": [],
         "train_correct": [],
         "train_loss": [],
-        "val_acc": [],
-        "val_correct": [],
         "val_loss": [],
+        "val_map": [],
+        "val_map_50": [],
+        "val_map_75": [],
+        "val_mar_100": [],
         "map_metric": [],
     }
 
@@ -302,15 +276,15 @@ def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, sche
         train_result = train_loop(train_loader, model, loss_fn, optimizer, batch_size, num_classes, device)
         val_result = test_loop(val_loader, model, loss_fn, num_classes, anchors, device) # for evaluate in each epoch
         print(f"Done epoch-{epoch}")
-        if val_result['accuracy'] > best_val_accuracy:
-            best_val_accuracy = val_result['accuracy']
+        if val_result['map'] > best_val_map:
+            best_val_map = val_result['map']
 
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
-                "best_val_accuracy": best_val_accuracy,
+                "best_val_map": best_val_map,
             }, "save/stage1_latest.pth")
 
         # scheduler.step()
@@ -320,17 +294,18 @@ def train_model(epochs, model, train_loader,val_loader, loss_fn, optimizer, sche
             f"train_correct={train_result['correct']:.4f} "
             f"train_acc={train_result['accuracy']:.4f} "
             f"val_loss={val_result['loss']:.4f} "
-            f"val_correct={val_result['correct']:.4f} "
-            f"val_acc={val_result['accuracy']:.4f} "
-            f"val_mAP={val_result['map_metric']} "
-            # f"val_mAP50={val_result['map_metric']['map50']:.4f}"
+            f"val_mAP={val_result['map']:.4f} "
+            f"val_mAP50={val_result['map_50']:.4f} "
+            f"val_mAR100={val_result['mar_100']:.4f}"
         )
         history["train_acc"].append(train_result["accuracy"]) # average accuracy among all classes
         history["train_correct"].append(train_result["correct"]) # average by total objects
         history["train_loss"].append(train_result["loss"])
-        history["val_acc"].append(val_result["accuracy"]) # average accuracy among all classes
-        history["val_correct"].append(val_result["correct"])  # average by total objects
         history["val_loss"].append(val_result["loss"])  # average by total objects
+        history["val_map"].append(val_result["map"])
+        history["val_map_50"].append(val_result["map_50"])
+        history["val_map_75"].append(val_result["map_75"])
+        history["val_mar_100"].append(val_result["mar_100"])
         history["map_metric"].append(val_result["map_metric"])
 
     print("Done epoch training !!!")
