@@ -138,13 +138,11 @@ def encode_yolo_target(target, anchors, grid_width, grid_height, grid_shape, num
             occupied[grid_y, grid_x, :],
         )
         if best_anchor == -1:
-            print(
-                f"WARNING: no free anchor for "
-                f"box={box.tolist()}, "
-                f"class={int(labels[i])}, "
-                f"cell=({grid_y},{grid_x})"
+            raise ValueError(
+                f"Unable to encode object for image '{target.get('image_id', 'unknown')}': "
+                f"all {A} anchors are occupied in cell ({grid_y},{grid_x}) "
+                f"for box={box.tolist()}, class={int(labels[i])}."
             )
-            continue
 
         # print("label index", i, VOC_CLASSES[labels[i]], grid_x, grid_y, "best_anchor", best_anchor)
         occupied[grid_y, grid_x, best_anchor] = True

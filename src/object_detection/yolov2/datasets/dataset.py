@@ -307,13 +307,11 @@ class YoloV2GridTransform:
                 occupied[grid_y, grid_x, :],
             )
             if best_anchor == -1:
-                print(
-                    f"WARNING: no free anchor for "
-                    f"box={box.tolist()}, "
-                    f"class={int(labels[i])}, "
-                    f"cell=({grid_y},{grid_x})"
+                raise ValueError(
+                    f"Unable to encode object for image '{image_id}': "
+                    f"all {A} anchors are occupied in cell ({grid_y},{grid_x}) "
+                    f"for box={box.tolist()}, class={int(labels[i])}."
                 )
-                continue
             occupied[grid_y, grid_x, best_anchor] = True
 
             # print("bounding box", f"[{b_w:.2f}, {b_h:.2f}]", "- anchor", anchors[best_anchor])
