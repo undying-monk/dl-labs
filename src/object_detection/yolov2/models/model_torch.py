@@ -158,9 +158,10 @@ class YOLOv2(nn.Module):
 
 def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, device):
     num_batches = len(dataloader)
-    size = len(dataloader.dataset)
+    dataset_size = len(dataloader.dataset)
 
     train_correct, train_loss = 0, 0
+    object_count = 0
     history = {
         "correct": 0,
         "loss": 0,
@@ -201,13 +202,13 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, d
 
         # sum all corrects prediction among anchor boxes and item() convert into float32 
         train_correct += (pred_class_id == true_class_id).sum().item()
-        size += true_class_id.numel()
+        object_count += true_class_id.numel()
 
         if batch % 100 == 0:
             loss, current = loss.item(), batch * batch_size + len(x)
-            print(f"\t loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+            print(f"\t loss: {loss:>7f}  [{current:>5d}/{dataset_size:>5d}]")
 
-    train_correct /= size
+    train_correct = train_correct / object_count if object_count else 0.0
     train_loss  /= num_batches
     history["loss"] = train_loss
     history["correct"] = train_correct
