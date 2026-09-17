@@ -269,9 +269,107 @@ class YoloV2GridTransform:
         self.default_value = default_value
         self.grid_height = grid_height
         self.grid_width = grid_width
-        self.anchors = anchors
+        # Original implementation stored a Python list and recreated this tensor for every box.
+        # Cache it once; __call__ only moves it if the target boxes use another device.
+        self.anchors = torch.as_tensor(anchors, dtype=torch.float32).clone()
 
     def __call__(self, target):
+        """Vectorized replacement for the original per-object target-encoding loop."""
+        bounding_boxes = target["boxes"]
+        device = bounding_boxes.device
+        boxes = bounding_boxes.to(device=device, dtype=torch.float32)
+        labels = torch.as_tensor(target["labels"], device=device, dtype=torch.long)
+        image_id = target["image_id"]
+        grid_rows, grid_columns = self.base_shape[:2]
+        num_anchors = len(self.anchors)
+        anchors = self.anchors.to(device=device)
+        target_tensor = torch.full(
+            self.base_shape,
+            self.default_value,
+            dtype=torch.float32,
+            device=device,
+        )
+        if boxes.numel() == 0:
+            return target_tensor
+
+        # Original loop calculated these values one box at a time. Each expression below
+        # operates on every box in the image at once: boxes has shape [N, 4].
+        box_widths = boxes[:, 2] - boxes[:, 0]
+        box_heights = boxes[:, 3] - boxes[:, 1]
+        midpoint_x = boxes[:, 0] + box_widths / 2
+        midpoint_y = boxes[:, 1] + box_heights / 2
+        box_wh = torch.stack((box_widths / self.grid_width, box_heights / self.grid_height), dim=1)
+
+        grid_x = torch.div(midpoint_x, self.grid_width, rounding_mode="floor").long().clamp(0, grid_columns - 1)
+        grid_y = torch.div(midpoint_y, self.grid_height, rounding_mode="floor").long().clamp(0, grid_rows - 1)
+        t_x = midpoint_x / self.grid_width - grid_x
+        t_y = midpoint_y / self.grid_height - grid_y
+
+        # Compute every object/anchor IoU together: [N, 2] vs [A, 2] -> [N, A].
+        # This replaces get_sorted_iou_anchors(...) inside the original object loop.
+        intersection = torch.minimum(box_wh[:, None, :], anchors[None, :, :]).prod(dim=-1)
+        box_areas = box_wh.prod(dim=-1, keepdim=True)
+        anchor_areas = anchors.prod(dim=-1).unsqueeze(0)
+        anchor_order = torch.argsort(
+            intersection / (box_areas + anchor_areas - intersection + 1e-16),
+            dim=1,
+            descending=True,
+        )
+
+        assigned_anchors = torch.full((len(boxes),), -1, dtype=torch.long, device=device)
+        occupied = torch.zeros(grid_rows * grid_columns * num_anchors, dtype=torch.bool, device=device)
+        object_indices = torch.arange(len(boxes), device=device)
+
+        # Assignment still needs collision resolution because only one object can use a
+        # (grid cell, anchor) slot. This loop is bounded by A (five), not N objects.
+        for rank in range(num_anchors):
+            unresolved = object_indices[assigned_anchors == -1]
+            if unresolved.numel() == 0:
+                break
+            candidate_anchors = anchor_order[unresolved, rank]
+            slots = ((grid_y[unresolved] * grid_columns + grid_x[unresolved]) * num_anchors + candidate_anchors)
+            available = ~occupied[slots]
+            unresolved = unresolved[available]
+            slots = slots[available]
+            candidate_anchors = candidate_anchors[available]
+            if unresolved.numel() == 0:
+                continue
+
+            first_object_for_slot = torch.full(
+                (occupied.numel(),),
+                len(boxes),
+                dtype=torch.long,
+                device=device,
+            )
+            first_object_for_slot.scatter_reduce_(0, slots, unresolved, reduce="amin", include_self=True)
+            winners = unresolved == first_object_for_slot[slots]
+            winner_indices = unresolved[winners]
+            winner_slots = slots[winners]
+            assigned_anchors[winner_indices] = candidate_anchors[winners]
+            occupied[winner_slots] = True
+
+        failed_indices = torch.where(assigned_anchors == -1)[0]
+        if failed_indices.numel() > 0:
+            failed_index = failed_indices[0]
+            raise ValueError(
+                f"Unable to encode object for image '{image_id}': all {num_anchors} anchors are occupied "
+                f"in cell ({grid_y[failed_index].item()},{grid_x[failed_index].item()}) "
+                f"for box={boxes[failed_index].tolist()}, class={labels[failed_index].item()}."
+            )
+
+        # Advanced indexing writes every encoded object in one operation, replacing the
+        # original scalar target_tensor[grid_y, grid_x, best_anchor, ...] assignments.
+        selected_anchors = anchors[assigned_anchors]
+        target_tensor[grid_y, grid_x, assigned_anchors, 0] = t_x
+        target_tensor[grid_y, grid_x, assigned_anchors, 1] = t_y
+        target_tensor[grid_y, grid_x, assigned_anchors, 2] = torch.log(box_wh[:, 0] / selected_anchors[:, 0])
+        target_tensor[grid_y, grid_x, assigned_anchors, 3] = torch.log(box_wh[:, 1] / selected_anchors[:, 1])
+        target_tensor[grid_y, grid_x, assigned_anchors, 4] = 1.0
+        target_tensor[grid_y, grid_x, assigned_anchors, 5 + labels] = 1.0
+        return target_tensor
+
+    def _encode_loop(self, target):
+        """Original per-object implementation retained only as a reference; __call__ does not use it."""
         """
         Args:
             label_info (tuple/dict): A structure containing your target indices and values.

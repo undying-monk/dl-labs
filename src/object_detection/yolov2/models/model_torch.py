@@ -557,12 +557,12 @@ def wrap_yolo_loss(loss_weight=[1, 1, .5, 1], anchors=None, stride=32, ignore_th
         # correct = (pred_class_id == true_class_id).sum().item()
 
         total_loss = loss_weight[0] * loss_boxes + loss_weight[1] * loss_obj + loss_weight[2] * loss_no_obj + loss_weight[3] * loss_class_scores
-        print(
-            loss_boxes.item(),
-            loss_obj.item(),
-            loss_no_obj.item(),
-            loss_class_scores.item(),
-        )
+        # print(
+        #     loss_boxes.item(),
+        #     loss_obj.item(),
+        #     loss_no_obj.item(),
+        #     loss_class_scores.item(),
+        # )
         return total_loss
     return yolo_loss
 
