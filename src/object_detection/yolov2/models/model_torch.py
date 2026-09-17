@@ -528,23 +528,23 @@ def wrap_yolo_loss(loss_weight=[1, 1, .5, 1], anchors=None, stride=32, ignore_th
 
         if no_obj_mask.any():
             loss_no_obj = F.binary_cross_entropy_with_logits(y_pred[..., 4][no_obj_mask], y_true[..., 4][no_obj_mask], reduction="mean")
-            noobj_logits = y_pred[..., 4][no_obj_mask]
-            noobj_probs = torch.sigmoid(noobj_logits)
-            print("noobj count:", noobj_logits.numel())
-            print("noobj logits mean:", noobj_logits.mean().item())
-            print("noobj logits min :", noobj_logits.min().item())
-            print("noobj logits max :", noobj_logits.max().item())
-            print("noobj prob mean  :", noobj_probs.mean().item())
-            print("noobj prob min   :", noobj_probs.min().item())
-            print("noobj prob max   :", noobj_probs.max().item())
+            # noobj_logits = y_pred[..., 4][no_obj_mask]
+            # noobj_probs = torch.sigmoid(noobj_logits)
+            # print("noobj count:", noobj_logits.numel())
+            # print("noobj logits mean:", noobj_logits.mean().item())
+            # print("noobj logits min :", noobj_logits.min().item())
+            # print("noobj logits max :", noobj_logits.max().item())
+            # print("noobj prob mean  :", noobj_probs.mean().item())
+            # print("noobj prob min   :", noobj_probs.min().item())
+            # print("noobj prob max   :", noobj_probs.max().item())
 
-            print(
-                "loss_noobj:",
-                F.binary_cross_entropy_with_logits(
-                    noobj_logits,
-                    torch.zeros_like(noobj_logits),
-                ).item()
-            )
+            # print(
+            #     "loss_noobj:",
+            #     F.binary_cross_entropy_with_logits(
+            #         noobj_logits,
+            #         torch.zeros_like(noobj_logits),
+            #     ).item()
+            # )
 
         pred_class = y_pred[..., 5:][obj_mask]   # [N_objects, num_classes]
         true_class = y_true[..., 5:][obj_mask]       # one-hot, [N_objects, num_classes]

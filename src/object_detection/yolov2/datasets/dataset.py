@@ -1,4 +1,5 @@
 from torch.utils.data import Dataset
+import os
 from PIL import Image
 import xml.etree.ElementTree as ET
 import torch
@@ -240,6 +241,21 @@ def get_transform(train=False):
     ])
 
     return v2.Compose(transforms)
+
+
+def get_dataloader_kwargs(device, max_workers=4):
+    """Return DataLoader settings tuned for the available hardware."""
+    num_workers = min(max_workers, os.cpu_count() or 1)
+    kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": str(device).startswith("cuda"),
+    }
+    if num_workers > 0:
+        kwargs.update(
+            persistent_workers=True,
+            prefetch_factor=2,
+        )
+    return kwargs
 
 
 class YoloV2GridTransform:
