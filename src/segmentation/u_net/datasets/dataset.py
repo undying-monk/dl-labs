@@ -1,0 +1,28 @@
+import torch
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+
+# 1. Define standard image transformations
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+def OxfordIIITPetTrainDataset():
+    return datasets.OxfordIIITPet(
+        root="./data",
+        split="trainval",       # Supports "trainval" or "test"
+        target_types="category", # Options: "category", "binary-category", "segmentation"
+        transform=transform,
+        download=False
+    )
+
+def OxfordIIITPetTestDataset():
+    return datasets.OxfordIIITPet(
+        root="./data",
+        split="test",       # Supports "trainval" or "test"
+        target_types="category", # Options: "category", "binary-category", "segmentation"
+        transform=transform,
+        download=False
+    )
