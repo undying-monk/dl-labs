@@ -180,7 +180,7 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, d
             loss, current = loss.item(), batch * batch_size + len(x)
             print(f"\t loss: {loss:>7f}  [{current:>5d}/{dataset_size:>5d}]")
 
-    train_correct = train_correct / object_count if object_count else 0.0
+    train_correct = train_correct / object_count
     train_loss  /= num_batches
     history["loss"] = train_loss
     history["correct"] = train_correct
@@ -198,6 +198,7 @@ def test_loop(dataloader, model, loss_fn, num_classes, device):
         "loss": 0,
         "correct": 0,
     }
+    object_count = 0
 
     with torch.no_grad():
         for batch , (X, y) in enumerate(dataloader):
@@ -212,12 +213,13 @@ def test_loop(dataloader, model, loss_fn, num_classes, device):
             pred = model(X) # [B, num_classes, 256,256]
             test_loss += loss_fn(pred, y).item()
             print("\t test_loss", test_loss)
-
+            
             pred_class_id = torch.argmax(pred, dim=1)
             test_correct += (pred_class_id == y).sum().item() # sum predictions of each batch
+            object_count += y.numel()
 
     test_loss /= num_batches
-    test_correct /= size
+    test_correct /= object_count
     history["loss"] = test_loss
     history["correct"] = test_correct
 
