@@ -8,20 +8,16 @@ from torchmetrics.classification import (
 from torchmetrics.detection import MeanAveragePrecision
 
 class DoubleConvBlock(nn.Module):
-    """Standard Convolution -> Batch Normalization -> Leaky ReLU block"""
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding: int | None = None):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding = 0):
         super().__init__()
-
-        if padding is None:
-            padding = kernel_size // 2
 
         self.block = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False),
+            nn.Conv2d(out_channels, out_channels, kernel_size, stride, padding, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
@@ -54,11 +50,14 @@ class DecoderBlock(nn.Module):
         super().__init__()
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.block = nn.Sequential(
-            DoubleConvBlock(in_channels, out_channels, kernel_size, stride=1, padding=1),
+            DoubleConvBlock(in_channels+out_channels, out_channels, kernel_size, stride=1, padding=1),
         )
     def forward(self, x, x_encoder):
+        # print("before upsample", x.shape, type(x), x_encoder.shape)
         x = self.upsample(x)
-        x = torch.cat([self.upsample, x_encoder], dim=1)
+        # print("after upsample", x.shape, type(x))
+        x = torch.cat([x, x_encoder], dim=1)
+        # print("after concatnate", x.shape, type(x))
         return self.block(x)
 
 class EncoderBlock(nn.Module):
@@ -79,28 +78,35 @@ class EncoderBlock(nn.Module):
     def forward(self, x):
         x = self.features(x)
         return x
+
+# [B,C,H,W] => [B]
+def encode_to_categories(pred):
+    return pred[..., 1]
     
 class UNet(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
-        self.encoder_stage_1 = EncoderBlock(3,64), # 256x256x64, 256x256x64
-        self.pool_1 = nn.MaxPool2d(2),    # 128x128x64
-        self.encoder_stage_2 = EncoderBlock(64, 128), # 128x128x128
-        self.pool_2 = nn.MaxPool2d(2),    # 64x64x128
-        self.encoder_stage_3 = EncoderBlock(128,256), # 64x64x256
-        self.pool_3 = nn.MaxPool2d(2),    # 32X32X256
-        self.encoder_stage_4 = EncoderBlock(256,512), # 32X32X512
-        self.pool_4 = nn.MaxPool2d(2),    # 16x16x512
+        self.encoder_stage_1 = EncoderBlock(3,64) # 256x256x64, 256x256x64
+        self.pool_1 = nn.MaxPool2d(2)    # 128x128x64
+        self.encoder_stage_2 = EncoderBlock(64, 128) # 128x128x128
+        self.pool_2 = nn.MaxPool2d(2)    # 64x64x128
+        self.encoder_stage_3 = EncoderBlock(128,256) # 64x64x256
+        self.pool_3 = nn.MaxPool2d(2)    # 32X32X256
+        self.encoder_stage_4 = EncoderBlock(256,512) # 32X32X512
+        self.pool_4 = nn.MaxPool2d(2)    # 16x16x512
 
         self.bottle_neck = EncoderBlock(512,1024) # 16x16x1024 => bottle neck
-        self.decoder_stage_1 = DecoderBlock(1024,512), # 32x32x512
-        self.decoder_stage_2 = DecoderBlock(512,256), # 64x64x256
-        self.decoder_stage_3 = DecoderBlock(256,128), # 128x128x128
-        self.decoder_stage_4 = DecoderBlock(128,64), # 256x256x64
-        self.final = nn.Conv2d(64, num_classes) # 256x256x N_classes
+
+        self.decoder_stage_1 = DecoderBlock(1024,512) # 32x32x512
+        self.decoder_stage_2 = DecoderBlock(512,256) # 64x64x256
+        self.decoder_stage_3 = DecoderBlock(256,128) # 128x128x128
+        self.decoder_stage_4 = DecoderBlock(128,64) # 256x256x64
+        self.final = nn.Conv2d(64, num_classes, 1) # 256x256x N_classes
 
     def forward(self, x):
+        # print("before encoder_stage_1", x.shape, type(x))
         x = self.encoder_stage_1(x)
+        # print("after encoder_stage_1", x.shape)
         x_1 = x.clone() 
         x = self.pool_1(x)
 
@@ -115,13 +121,17 @@ class UNet(nn.Module):
         x = self.encoder_stage_4(x)
         x_4 = x.clone() 
         x = self.pool_4(x)
-        
-        x = self.bottle_neck(x_4)
+
+        x = self.bottle_neck(x)
+
+        # print("before decoder_stage_1", x.shape, type(x))
         x = self.decoder_stage_1(x, x_4)
+        # print("before decoder_stage_2", x.shape, type(x))
         x = self.decoder_stage_2(x, x_3)
         x = self.decoder_stage_3(x, x_2)
         x = self.decoder_stage_4(x, x_1)
         x = self.final(x)
+        # x = encode_to_categories(x)
         return x # [H,W,classes], [B, C, H, W] => for epoch, so use argmax to retrieve [B,H,W]
 
 
@@ -134,7 +144,8 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, d
     history = {
         "correct": 0,
         "loss": 0,
-        "accuracy": MulticlassAccuracy(num_classes=num_classes, average="macro").to(device),
+        "accuracy": 0
+        # "accuracy": MulticlassAccuracy(num_classes=num_classes, average="macro").to(device),
     }
 
     model.train()
@@ -143,11 +154,12 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, d
         # if batch == 5:
         #     break
 
-        x = x.to(device)
-        y = y.to(device)
-
+        x = x.to(device) # [3,256,256]
+        y = y.to(device) # [B, 1,256,256]
+        y = y.squeeze(dim=1) # [B,256,256]
+        
         # forward
-        pred = model(x)
+        pred = model(x) # [B, num_classes, 256,256]
         loss = loss_fn(pred, y)
         print("\t loss", loss.item())
 
@@ -157,21 +169,15 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, d
         optimizer.zero_grad() # reset grad, since it accumulate grad each batch
 
         train_loss += loss.item()
-        obj_mask = y[..., 4] == 1
 
-        pred_obj = torch.sigmoid(pred[..., 4])
-        print("positive objectness:", pred_obj[obj_mask].mean().item())
-        print("background objectness:", pred_obj[~obj_mask].mean().item())
+        pred_class_id = torch.argmax(pred, dim=1) # [B, num_classes, 256,256] => [B, 256,256], row_wise argmax
+        print("pred_class_id", pred_class_id, "true_class_id", y)
 
-        pred_class = pred[..., 5:][obj_mask]   # [N_objects, num_classes]
-        true_class = y[..., 5:][obj_mask]       # one-hot, [N_objects, num_classes]
-        pred_class_id = pred_class.argmax(dim=-1)
-        true_class_id = true_class.argmax(dim=-1)
-        history["accuracy"].update(pred_class_id, true_class_id)
+        # history["accuracy"].update(pred_class_id, true_class_id)
 
         # sum all corrects prediction among anchor boxes and item() convert into float32 
-        train_correct += (pred_class_id == true_class_id).sum().item()
-        object_count += true_class_id.numel()
+        train_correct += (pred_class_id == y).sum().item()
+        object_count += y.numel()
 
         if batch % 100 == 0:
             loss, current = loss.item(), batch * batch_size + len(x)
@@ -181,18 +187,19 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, d
     train_loss  /= num_batches
     history["loss"] = train_loss
     history["correct"] = train_correct
-    history["accuracy"] = history["accuracy"].compute().item()
+    # history["accuracy"] = history["accuracy"].compute().item()
     return history
 
 
 
-def test_loop(dataloader, model, loss_fn, num_classes, anchors, device):
+def test_loop(dataloader, model, loss_fn, num_classes, device):
     model.eval()
-    test_loss = 0
+    test_correct, test_loss = 0, 0
     num_batches = len(dataloader)
+    size = len(dataloader.dataset)
     history = {
         "loss": 0,
-        "map_metric": MeanAveragePrecision(box_format="xyxy",iou_type="bbox").to(device),
+        "correct": 0,
     }
 
     with torch.no_grad():
@@ -205,27 +212,15 @@ def test_loop(dataloader, model, loss_fn, num_classes, anchors, device):
             y = y.to(device)
             pred = model(X)
             test_loss += loss_fn(pred, y).item()
+
+            prediction = pred.argmax(1)
+            test_correct += (prediction == y).sum().item() # sum predictions of each batch
             # prediction = pred.argmax(1)
 
-            preds = decode_batch_predictions(
-                pred,
-                anchors,
-                conf_threshold=0.001,
-                nms_threshold=0.5,
-            )
-            metric_labels = decode_batch_targets(
-                y,
-                anchors,
-            )
-            history["map_metric"].update(preds, metric_labels)
-
     test_loss /= num_batches
-    history["map_metric"] = history["map_metric"].compute()
+    test_correct /= size
     history["loss"] = test_loss
-    history["map"] = history["map_metric"]["map"].item()
-    history["map_50"] = history["map_metric"]["map_50"].item()
-    history["map_75"] = history["map_metric"]["map_75"].item()
-    history["mar_100"] = history["map_metric"]["mar_100"].item()
+    history["correct"] = test_correct
 
     return history
 
@@ -276,13 +271,11 @@ def train_model(
     scheduler,
     batch_size,
     num_classes,
-    anchors,
     device,
     checkpoint_path="save/latest.pth",
     best_checkpoint_path="save/best.pth",
     resume=True,
 ):
-    best_val_map = 0.0
     start_epoch = 0
 
     history = {
@@ -290,11 +283,7 @@ def train_model(
         "train_correct": [],
         "train_loss": [],
         "val_loss": [],
-        "val_map": [],
-        "val_map_50": [],
-        "val_map_75": [],
-        "val_mar_100": [],
-        "map_metric": [],
+        "val_correct": [],
     }
 
     if resume and Path(checkpoint_path).is_file():
@@ -307,17 +296,17 @@ def train_model(
         )
         start_epoch = checkpoint["epoch"] + 1
         checkpoint_metrics = checkpoint["metrics"]
-        best_val_map = checkpoint_metrics.get("best_val_map", 0.0)
+        best_val_correct = checkpoint_metrics.get("best_val_correct", 0.0)
         history = checkpoint_metrics.get("history", history)
         print(f"Resuming training from epoch {start_epoch}.")
 
     for epoch in range(start_epoch, epochs):
         train_result = train_loop(train_loader, model, loss_fn, optimizer, batch_size, num_classes, device)
-        val_result = test_loop(val_loader, model, loss_fn, num_classes, anchors, device) # for evaluate in each epoch
+        val_result = test_loop(val_loader, model, loss_fn, num_classes, device) # for evaluate in each epoch
         print(f"Done epoch-{epoch}")
-        is_best = val_result["map"] > best_val_map
+        is_best = val_result["correct"] > best_val_correct
         if is_best:
-            best_val_map = val_result['map']
+            best_val_correct = val_result["correct"]
 
         print(
             f"[{epoch+1}/{epochs}] "
@@ -325,25 +314,19 @@ def train_model(
             f"train_correct={train_result['correct']:.4f} "
             f"train_acc={train_result['accuracy']:.4f} "
             f"val_loss={val_result['loss']:.4f} "
-            f"val_mAP={val_result['map']:.4f} "
-            f"val_mAP50={val_result['map_50']:.4f} "
-            f"val_mAR100={val_result['mar_100']:.4f}"
+            f"val_correct={val_result['correct']:.4f} "
         )
         history["train_acc"].append(train_result["accuracy"]) # average accuracy among all classes
         history["train_correct"].append(train_result["correct"]) # average by total objects
         history["train_loss"].append(train_result["loss"])
         history["val_loss"].append(val_result["loss"])  # average by total objects
-        history["val_map"].append(val_result["map"])
-        history["val_map_50"].append(val_result["map_50"])
-        history["val_map_75"].append(val_result["map_75"])
-        history["val_mar_100"].append(val_result["mar_100"])
-        history["map_metric"].append(val_result["map_metric"])
+        history["val_correct"].append(val_result["correct"])  # average by total objects
 
         if scheduler is not None:
             scheduler.step()
 
         checkpoint_metrics = {
-            "best_val_map": best_val_map,
+            "best_val_correct": best_val_correct,
             "history": history,
         }
         save_checkpoint(
