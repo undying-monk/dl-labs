@@ -46,18 +46,21 @@ class EncoderBlock(nn.Module):
 
 class DecoderBlock(nn.Module):
     """Standard Convolution -> Batch Normalization -> Leaky ReLU block"""
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
+    def __init__(self, in_channels, out_channels, skip_channels, kernel_size=3):
         super().__init__()
-        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        # Double spatial resolution and reduce channels using Tranpose Convolution
+        # self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2) 
+
+        # Concatenation adds the decoder and skip channels
         self.block = nn.Sequential(
-            DoubleConvBlock(in_channels+out_channels, out_channels, kernel_size, stride=1, padding=1),
+            DoubleConvBlock(skip_channels+out_channels, out_channels, kernel_size, stride=1, padding=1),
         )
     def forward(self, x, x_encoder):
-        # print("before upsample", x.shape, type(x), x_encoder.shape)
-        x = self.upsample(x)
-        # print("after upsample", x.shape, type(x))
+        x = self.up(x)
+
+        # Concatenate along channel dimension
         x = torch.cat([x, x_encoder], dim=1)
-        # print("after concatnate", x.shape, type(x))
         return self.block(x)
 
 class EncoderBlock(nn.Module):
@@ -86,7 +89,7 @@ def encode_to_categories(pred):
 class UNet(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
-        self.encoder_stage_1 = EncoderBlock(3,64) # 256x256x64, 256x256x64
+        self.encoder_stage_1 = EncoderBlock(3,64) # 256x256x64
         self.pool_1 = nn.MaxPool2d(2)    # 128x128x64
         self.encoder_stage_2 = EncoderBlock(64, 128) # 128x128x128
         self.pool_2 = nn.MaxPool2d(2)    # 64x64x128
@@ -96,11 +99,10 @@ class UNet(nn.Module):
         self.pool_4 = nn.MaxPool2d(2)    # 16x16x512
 
         self.bottle_neck = EncoderBlock(512,1024) # 16x16x1024 => bottle neck
-
-        self.decoder_stage_1 = DecoderBlock(1024,512) # 32x32x512
-        self.decoder_stage_2 = DecoderBlock(512,256) # 64x64x256
-        self.decoder_stage_3 = DecoderBlock(256,128) # 128x128x128
-        self.decoder_stage_4 = DecoderBlock(128,64) # 256x256x64
+        self.decoder_stage_1 = DecoderBlock(1024,512,512) # 32x32x512, 1024 -> 512 + 512 -> 512
+        self.decoder_stage_2 = DecoderBlock(512,256,256) # 64x64x256
+        self.decoder_stage_3 = DecoderBlock(256,128,128) # 128x128x128
+        self.decoder_stage_4 = DecoderBlock(128,64,64) # 256x256x64
         self.final = nn.Conv2d(64, num_classes, 1) # 256x256x N_classes
 
     def forward(self, x):
@@ -151,8 +153,8 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, d
     model.train()
     for batch , (x, y) in enumerate(dataloader):
         print(f"train_loop-{batch}")
-        # if batch == 5:
-        #     break
+        if batch == 5:
+            break
 
         x = x.to(device) # [3,256,256]
         y = y.to(device) # [B, 1,256,256]
@@ -171,11 +173,6 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, d
         train_loss += loss.item()
 
         pred_class_id = torch.argmax(pred, dim=1) # [B, num_classes, 256,256] => [B, 256,256], row_wise argmax
-        print("pred_class_id", pred_class_id, "true_class_id", y)
-
-        # history["accuracy"].update(pred_class_id, true_class_id)
-
-        # sum all corrects prediction among anchor boxes and item() convert into float32 
         train_correct += (pred_class_id == y).sum().item()
         object_count += y.numel()
 
@@ -206,16 +203,18 @@ def test_loop(dataloader, model, loss_fn, num_classes, device):
         for batch , (X, y) in enumerate(dataloader):
             print(f"test_loop-{batch}")
 
-            # if batch == 5:
-            #     break
-            X = X.to(device)
-            y = y.to(device)
-            pred = model(X)
-            test_loss += loss_fn(pred, y).item()
+            if batch == 5:
+                break
+            X = X.to(device) # [3,256,256]
+            y = y.to(device)  # [B, 1,256,256]
+            y = y.squeeze(dim=1) # [B,256,256]
 
-            prediction = pred.argmax(1)
-            test_correct += (prediction == y).sum().item() # sum predictions of each batch
-            # prediction = pred.argmax(1)
+            pred = model(X) # [B, num_classes, 256,256]
+            test_loss += loss_fn(pred, y).item()
+            print("\t test_loss", test_loss)
+
+            pred_class_id = torch.argmax(pred, dim=1)
+            test_correct += (pred_class_id == y).sum().item() # sum predictions of each batch
 
     test_loss /= num_batches
     test_correct /= size
@@ -286,6 +285,8 @@ def train_model(
         "val_correct": [],
     }
 
+
+    best_val_correct = 0
     if resume and Path(checkpoint_path).is_file():
         checkpoint = load_checkpoint(
             checkpoint_path,
