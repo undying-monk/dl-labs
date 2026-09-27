@@ -153,8 +153,8 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, num_classes, d
     model.train()
     for batch , (x, y) in enumerate(dataloader):
         print(f"train_loop-{batch}")
-        if batch == 5:
-            break
+        # if batch == 5:
+        #     break
 
         x = x.to(device) # [3,256,256]
         y = y.to(device) # [B, 1,256,256]
@@ -204,8 +204,8 @@ def test_loop(dataloader, model, loss_fn, num_classes, device):
         for batch , (X, y) in enumerate(dataloader):
             print(f"test_loop-{batch}")
 
-            if batch == 5:
-                break
+            # if batch == 5:
+            #     break
             X = X.to(device) # [3,256,256]
             y = y.to(device)  # [B, 1,256,256]
             y = y.squeeze(dim=1) # [B,256,256]

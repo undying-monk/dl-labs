@@ -105,6 +105,9 @@ def target_transform(mask_pil):
     mask_tensor = mask_resized.long()
     
     # Shift Oxford-IIIT Pet labels: Trimap (1, 2, 3) -> Class Indices (0, 1, 2)
+    # Class 0: Pet / Foreground (The animal's body)
+    # Class 1: Background (Surrounding environment like grass, carpet, or walls)
+    # Class 2: Contour / Border (The outline area where the animal meets the background)
     return mask_tensor - 1
 
 def OxfordIIITPetTrainDataset():
