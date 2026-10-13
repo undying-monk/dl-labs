@@ -1,11 +1,6 @@
 import mlflow
 from sklearn.metrics import accuracy_score
 from mlflow import MlflowClient
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler,OneHotEncoder,MinMaxScaler,OrdinalEncoder
 
 model_name = "iris_model"
 
@@ -55,31 +50,3 @@ def load_model_by_version(version):
     model_uri = f"models:/{model_name}/{version}"
     model = mlflow.sklearn.load_model(model_uri)
     return model
-
-def get_preprocessing(numeric_columns, categorical_columns, ordinal_columns):
-    handle_nummerical = Pipeline(steps=[
-        ('impute', SimpleImputer(strategy='mean')),
-        ('scale', StandardScaler()),
-    ])
-
-    handle_nomial = Pipeline(steps=[
-        ('impute', SimpleImputer(strategy='most_frequent')),
-        ('encode', OneHotEncoder(handle_unknown='ignore')),
-    ])
-
-    handle_ordinal = Pipeline(steps=[
-        ('impute', SimpleImputer(strategy='most_frequent')),
-        ('encode', OrdinalEncoder()),
-    ])
-
-    preprocessing = ColumnTransformer(transformers=[
-        ('num', handle_nummerical, numeric_columns),
-        ('cat', handle_nomial, categorical_columns),
-        ('ordinal', handle_ordinal, ordinal_columns),
-    ])
-
-    # pipe_adasyn = Pipeline(steps=[
-    # ('preprocessing', preprocessing), 
-    # ('smote', adasyn)])
-
-    return preprocessing

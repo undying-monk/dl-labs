@@ -7,7 +7,8 @@ from sklearn import datasets
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from utils import wrapper_logging, load_model_by_alias,load_model_by_version, get_preprocessing
+from utils.utils import wrapper_logging, load_model_by_alias,load_model_by_version
+from utils.dataprocessing import get_preprocessing_by_df
 
 def get_columns():
     return datasets.load_iris().feature_names
@@ -73,15 +74,14 @@ def main():
 
     columns = get_columns()
     # visual_df(X_test, y_test, model, columns)
-
-    load_model(X_test,y_test)
+    # load_model(X_test,y_test)
 
     df = pd.DataFrame(X_train, columns=columns)
-    numeric_columns = df.select_dtypes(include=['float64','int64']).columns
-    categorical_columns = df.select_dtypes(include=['object','category']).columns
-    ordinal_columns = []
-    preprocessing = get_preprocessing(numeric_columns, categorical_columns, ordinal_columns)
-    preprocessing.fit_transform(X_train)
+    preprocessing = get_preprocessing_by_df(df)
+    print("Before train len", len(X_train))
+    X_train = preprocessing.fit_transform(X_train)
+    print("After train len", X_train.shape)
+
 
 if __name__ == "__main__":
     main()
