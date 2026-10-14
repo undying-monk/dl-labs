@@ -42,6 +42,7 @@ def load_tags_by_alias(alias):
 def load_model_by_alias(alias):
     # Get the model version using a model URI
     model_uri = f"models:/{model_name}@{alias}"
+    print("model_uri", model_uri)
     model = mlflow.sklearn.load_model(model_uri)
     return model
 

@@ -58,10 +58,8 @@ def training_loop(X_train,y_train,X_test,y_test, params):
     y_pred = model.predict(X_test)
     return model, y_pred, y_test
 
-def load_model(X_test,y_test):
-    model = load_model_by_alias("production")
+def test_one_example(model, X_test, y_test):
     idx = 0
-
     y_pred = model.predict(X_test[idx].reshape(1, -1))
     print("Predict", X_test[idx], y_pred[-1], y_test[idx])
 
@@ -74,13 +72,21 @@ def main():
 
     columns = get_columns()
     # visual_df(X_test, y_test, model, columns)
-    # load_model(X_test,y_test)
+    # test_one_example(X_test,y_test)
 
     df = pd.DataFrame(X_train, columns=columns)
-    preprocessing = get_preprocessing_by_df(df)
+    preprocessing_train = get_preprocessing_by_df(df)
     print("Before train len", len(X_train))
-    X_train = preprocessing.fit_transform(X_train)
+    X_train = preprocessing_train.fit_transform(X_train)
     print("After train len", X_train.shape)
+
+    test_df = pd.DataFrame(X_test, columns=columns)
+    preprocessing_test = get_preprocessing_by_df(test_df)
+    X_test = preprocessing_test.transform(X_test)
+    model = load_model_by_alias("production")
+
+    y_pred = model.predict(X_test.reshape(1, -1))
+    print("Predict", X_test, y_pred[-1], y_test)
 
 
 if __name__ == "__main__":
