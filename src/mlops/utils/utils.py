@@ -32,6 +32,24 @@ def set_alias_tag(version, alias):
     client.set_registered_model_alias(name=model_name,alias=alias,version=str(version))
     print(f"Successfully registered and set version {version} to '@{alias}'")
 
+def get_model_uri(alias):
+    client = MlflowClient()
+    model_version = client.get_model_version_by_alias(model_name, alias)
+    return f"models:/{model_version.name}/{model_version.version}"
+
+def download_artifacts(alias):
+    client = MlflowClient()
+    print("model_version", model_name, alias)
+    model_version = client.get_model_version_by_alias(model_name, alias)
+    underlying_artifact_uri = model_version.source
+    print(f"Underlying Storage Path: {underlying_artifact_uri}")
+
+    download_uri = client.get_model_version_download_uri(
+        name=model_name, version=model_version.version
+    )
+    print(f"Registry Download URI: {download_uri}")
+    return mlflow.artifacts.download_artifacts(artifact_uri=download_uri)
+
 def load_tags_by_alias(alias):
     client = MlflowClient()
     model_info = client.get_model_version_by_alias(model_name, alias)

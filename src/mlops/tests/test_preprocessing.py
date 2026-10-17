@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.mlops.utils.dataprocessing import prepare_features
+from src.mlops.utils.dataprocessing import prepare_features,get_pipeline
+from src.mlops.model import init_model, get_hyperparameters
 
 
 FEATURES = [
@@ -15,11 +16,19 @@ FEATURES = [
 @pytest.fixture
 def sample():
     return pd.DataFrame({
-        "sepal_length": [5.1],
-        "sepal_width": [3.5],
-        "petal_length": [1.4],
-        "petal_width": [0.2],
+        "sepal_length": [5.1, 1.1],
+        "sepal_width": [3.5, 3.1],
+        "petal_length": [1.4, 1.2],
+        "petal_width": [0.2, 0.4],
     })
+
+@pytest.fixture
+def params():
+    return {
+        "solver": "lbfgs",
+        "max_iter": 1000,
+        "random_state": 8888,
+    }
 
 
 def test_reorders_columns_without_changing_input(sample):
@@ -28,8 +37,8 @@ def test_reorders_columns_without_changing_input(sample):
 
     result = prepare_features(shuffled, FEATURES)
 
-    np.testing.assert_allclose(result, [[5.1, 3.5, 1.4, 0.2]])
-    assert result.shape == (1, 4)
+    np.testing.assert_allclose(result, [[5.1, 3.5, 1.4, 0.2], [1.1,3.1,1.2,0.4]])
+    assert result.shape == (2, 4)
     assert result.dtype == np.float64
     pd.testing.assert_frame_equal(shuffled, original)
 
@@ -60,3 +69,14 @@ def test_rejects_invalid_schema(sample, case):
     with pytest.raises(ValueError):
         print("bad", bad)
         prepare_features(bad, FEATURES)
+
+def test_prediction(sample, params):
+    X_train = prepare_features(sample, FEATURES)
+    model = init_model(params)
+    print(X_train)
+    pl = get_pipeline(sample, model)
+    pl.fit(X_train, [1,0])
+    actual = pl.predict(X_train)
+    assert actual.shape == (2,)
+    # print(actual.shape ,actual.dtype, type(actual), actual)
+    np.testing.assert_array_equal(actual, [1,0])

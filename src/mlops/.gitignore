@@ -4,3 +4,4 @@ logs/
 save/
 *.weights.h5
 mlflow.db
+model/

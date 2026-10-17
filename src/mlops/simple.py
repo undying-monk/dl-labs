@@ -28,14 +28,13 @@ def get_hyperparameters():
         "random_state": 8888,
     }
 
-def train_model(X_train,y_train, params):
+def init_model(params):
     # Enable autologging for scikit-learn
     # mlflow.sklearn.autolog()
 
     # Just train the model normally
     lr = LogisticRegression(**params)
-    lr.fit(X_train, y_train)
-    return lr, params
+    return lr
 
 def predict(model, X, y):
     y_pred = model.predict(X)
@@ -54,7 +53,8 @@ def visual_df(X_test, y_test, model, columns):
 
 # can use decorator in here
 def training_loop(X_train,y_train,X_test,y_test, params):
-    model, params = train_model(X_train,y_train, params)
+    model = init_model(params)
+    model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
     return model, y_pred, y_test
 

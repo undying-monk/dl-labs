@@ -5,7 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi[standard]>=0.143.0",
     "h5py>=3.16.0",
+    "httpx>=0.28.1",
     "keras-tuner>=1.4.8",
     "matplotlib>=3.10.9",
     "mlflow>=3.17.0",
@@ -36,3 +38,9 @@ torchvision = [
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
+
+[tool.fastapi]
+entrypoint = "src.mlops.app:app"
+
+[tool.uv.workspace]
+members = ["src/*"]
